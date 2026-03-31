@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  threejs-app:
+    image: node:20-alpine # 使用轻量级的 Node.js 环境
+    working_dir: /app
+    volumes:
+      - .:/app            # 将你 WSL 的当前目录映射到容器内的 /app
+    ports:
+      - "5173:5173"       # 暴露 5173 端口供你的 Windows 浏览器访问
+    command: sh -c "npm install && npm run dev -- --host" 
+    # 这里的 --host 非常重要！它允许你的 Windows 宿主机访问 WSL/Docker 里的网络

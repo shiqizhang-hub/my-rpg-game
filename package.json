@@ -1,0 +1,19 @@
+{
+  "name": "my-rpg-game",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "prepare:gas": "node scripts/prepare-gas.mjs",
+    "build:gas": "npm run build && npm run prepare:gas"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "vite-plugin-singlefile": "^2.3.2"
+  },
+  "dependencies": {
+    "three": "^0.160.0"
+  }
+}
