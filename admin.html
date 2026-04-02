@@ -84,6 +84,7 @@
       }
       .toolBtn:hover { background: rgba(125,212,255,.12); }
       .toolBtn.active { background: rgba(125,212,255,.2); border-color: var(--accent); color: var(--accent); }
+      .toolBtn.toggleOn { background: rgba(131,243,174,.16); border-color: var(--ok); color: var(--ok); }
       #mapHint {
         position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
         font-size: 11px; color: var(--muted); pointer-events: none;
@@ -155,6 +156,56 @@
       .alertEntry:hover { background: rgba(255,255,255,.04); }
       .alertEntry .aTime { font-size: 10px; color: rgba(130,200,240,.5); margin-bottom: 2px; }
       .alertEntry .aText { color: var(--warn); }
+      .alertEntry .aMeta { font-size: 10px; color: var(--muted); margin-top: 3px; }
+      #alertFilterCount {
+        font-size: 10px;
+        color: var(--accent);
+        background: rgba(119,213,255,.12);
+        border-radius: 999px;
+        padding: 2px 8px;
+      }
+      #alertFilters {
+        display: grid;
+        gap: 6px;
+        padding: 8px 14px;
+        border-bottom: 1px solid rgba(133,201,242,.08);
+      }
+      .alertFilterRow {
+        display: flex;
+        gap: 6px;
+      }
+      #alertFilterUser, #alertFilterFloor, #alertTimeWindow, #alertTimeStart, #alertTimeEnd {
+        min-width: 0;
+        padding: 6px 8px;
+        background: rgba(255,255,255,.06);
+        border: 1px solid var(--line-strong);
+        border-radius: 5px;
+        color: var(--text);
+        font-size: 11px;
+        font-family: inherit;
+        outline: none;
+      }
+      #alertFilterFloor, #alertTimeWindow {
+        appearance: none;
+        background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
+      }
+      #alertFilterFloor option, #alertTimeWindow option {
+        background: #0e1c29;
+        color: var(--text);
+      }
+      #alertTimeStart::-webkit-calendar-picker-indicator,
+      #alertTimeEnd::-webkit-calendar-picker-indicator {
+        filter: invert(92%) sepia(10%) saturate(411%) hue-rotate(170deg) brightness(101%) contrast(97%);
+        cursor: pointer;
+      }
+      #alertTimeStart.timeInactive,
+      #alertTimeEnd.timeInactive {
+        opacity: .45;
+      }
+      #alertFilterUser { flex: 1; }
+      #alertFilterFloor { width: 74px; }
+      #alertTimeWindow { flex: 1; }
+      #alertTimeStart, #alertTimeEnd { flex: 1; }
       /* broadcast */
       #broadcastSection { padding: 10px 14px; }
       #broadcastInput {
@@ -184,6 +235,42 @@
         transition: background .15s;
       }
       .simBtn:hover { background: rgba(125,212,255,.1); }
+
+      /* snapshots */
+      #snapshotSection {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--line);
+        display: grid;
+        gap: 6px;
+      }
+      .snapshotRow {
+        display: flex;
+        gap: 6px;
+      }
+      #snapshotName, #snapshotSelect {
+        flex: 1;
+        min-width: 0;
+        padding: 7px 10px;
+        background: rgba(255,255,255,.06);
+        border: 1px solid var(--line-strong);
+        border-radius: 5px;
+        color: var(--text);
+        font-size: 12px;
+        font-family: inherit;
+        outline: none;
+      }
+      #snapshotSelect option { background: #0e1c29; }
+      .snapshotBtn {
+        padding: 6px 10px;
+        font-size: 12px;
+        border: 1px solid var(--line-strong);
+        border-radius: 5px;
+        background: var(--bg-2);
+        color: var(--text);
+        font-family: inherit;
+        cursor: pointer;
+      }
+      .snapshotBtn:hover { background: rgba(125,212,255,.1); }
 
       /* ── Connection panel (collapsible) ───────────────────────── */
       #connPanel {
@@ -289,6 +376,9 @@
           <button class="toolBtn active" id="toolDrawRect">▯ Rect</button>
           <button class="toolBtn" id="toolDrawCircle">○ Circle</button>
           <button class="toolBtn" id="toolDrawPoly">⬡ Polygon</button>
+          <button class="toolBtn" id="btnUndo">↶ Undo</button>
+          <button class="toolBtn" id="btnRedo">↷ Redo</button>
+          <button class="toolBtn toggleOn" id="btnAutoPublish">Auto Publish: ON</button>
           <button class="toolBtn" id="btnPublishZones">↑ Push Zones to Users</button>
           <button class="toolBtn" id="btnExportZones">↓ Export JSON</button>
           <button class="toolBtn" id="btnImportZones">↑ Import JSON</button>
@@ -306,6 +396,23 @@
           <button class="simBtn" id="btnClearLog">Clear Log</button>
         </div>
 
+        <div id="snapshotSection" class="sideSection">
+          <div class="sideHeader">Zone Snapshots</div>
+          <div class="snapshotRow">
+            <input id="snapshotName" type="text" placeholder="Snapshot name" maxlength="40" />
+            <button class="snapshotBtn" id="btnSaveSnapshot">Save</button>
+          </div>
+          <div class="snapshotRow">
+            <select id="snapshotSelect">
+              <option value="">No snapshots</option>
+            </select>
+          </div>
+          <div class="snapshotRow">
+            <button class="snapshotBtn" id="btnLoadSnapshot">Load</button>
+            <button class="snapshotBtn" id="btnDeleteSnapshot">Delete</button>
+          </div>
+        </div>
+
         <!-- User list -->
         <div class="sideSection" id="userListSection">
           <div class="sideHeader">Online Users <span class="badge" id="userCountBadge">0</span></div>
@@ -320,7 +427,37 @@
 
         <!-- Alert log -->
         <div class="sideSection" id="alertLogSection">
-          <div class="sideHeader">Alert Log</div>
+          <div class="sideHeader">Alert Log <span id="alertFilterCount">0 / 0</span></div>
+          <div id="alertFilters">
+            <div class="alertFilterRow">
+              <input id="alertFilterUser" type="text" placeholder="Filter user" />
+              <select id="alertFilterFloor">
+                <option value="">All</option>
+                <option value="1">1F</option>
+                <option value="2">2F</option>
+                <option value="3">3F</option>
+              </select>
+            </div>
+            <div class="alertFilterRow">
+              <select id="alertTimeWindow">
+                <option value="all">All Time</option>
+                <option value="this-hour">This Hour</option>
+                <option value="today">Today</option>
+                <option value="this-shift">This Shift</option>
+                <option value="5m">Last 5 min</option>
+                <option value="15m">Last 15 min</option>
+                <option value="30m">Last 30 min</option>
+                <option value="1h">Last 1 hour</option>
+                <option value="6h">Last 6 hours</option>
+                <option value="24h">Last 24 hours</option>
+                <option value="custom">Custom Range</option>
+              </select>
+            </div>
+            <div class="alertFilterRow">
+              <input id="alertTimeStart" type="datetime-local" />
+              <input id="alertTimeEnd" type="datetime-local" />
+            </div>
+          </div>
           <div id="alertLog"></div>
         </div>
 

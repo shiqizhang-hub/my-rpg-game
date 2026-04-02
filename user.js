@@ -28,7 +28,11 @@ const stairPromptEl = document.querySelector('#stairPrompt');
 const stairPromptTextEl = document.querySelector('#stairPromptText');
 const stairConfirmBtnEl = document.querySelector('#stairConfirmBtn');
 const stairCancelBtnEl = document.querySelector('#stairCancelBtn');
+const miniMapCanvasEl = document.querySelector('#miniMapCanvas');
+const dangerHintPanelEl = document.querySelector('#dangerHintPanel');
+const dangerHintTextEl = document.querySelector('#dangerHintText');
 const appEl = document.querySelector('#app');
+const miniMapCtx = miniMapCanvasEl.getContext('2d');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const FLOOR_HEIGHT       = 8;
@@ -38,6 +42,14 @@ const WALK_ANIM_FREQ     = 8.2;
 const INTERACT_DISTANCE  = 2.6;
 const PUBLISH_INTERVAL   = 200; // ms
 const STAIR_COOLDOWN     = 0.6; // s
+const WORLD_X_MIN        = -23;
+const WORLD_X_MAX        = 23;
+const WORLD_Z_MIN        = -18;
+const WORLD_Z_MAX        = 18;
+const MINIMAP_PADDING    = 12;
+const ALERT_PUBLISH_COOLDOWN_MS = 15000;
+const DANGER_NEAR_DISTANCE = 3;
+const DANGER_FAR_DISTANCE = 8;
 
 const FLOOR_CONFIGS = [
     { number: 1, name: 'Triage Level',   accent: 0x5db4ff, floorColor: 0x162a3a },
@@ -132,6 +144,7 @@ let activeAlertZoneId = '';
 let pendingStair = null;
 let currentMoveSpeed = 0;
 let playerStepPhase = 0;
+const lastAlertPublishedAt = new Map();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getFloorY(n) { return (n - 1) * FLOOR_HEIGHT; }
@@ -140,6 +153,15 @@ function worldPos(floorNumber, x, z, y = 0) {
     return new THREE.Vector3(x, getFloorY(floorNumber) + y, z);
 }
 function damp(cur, tgt, s, dt) { return THREE.MathUtils.lerp(cur, tgt, 1 - Math.exp(-s * dt)); }
+
+function worldToMiniMap(x, z) {
+    const width = miniMapCanvasEl.width - MINIMAP_PADDING * 2;
+    const height = miniMapCanvasEl.height - MINIMAP_PADDING * 2;
+    return {
+        x: MINIMAP_PADDING + ((x - WORLD_X_MIN) / (WORLD_X_MAX - WORLD_X_MIN)) * width,
+        y: MINIMAP_PADDING + ((WORLD_Z_MAX - z) / (WORLD_Z_MAX - WORLD_Z_MIN)) * height
+    };
+}
 
 function addColliderBox(floorNumber, x, z, w, d, h, y = h / 2) {
     colliders.push({
@@ -728,6 +750,7 @@ function setFloor(n) {
     });
     player.position.y = targetY + 0;
     hudFloorEl.textContent = `${n}F — ${getFloorConfig(n).name}`;
+    drawMiniMap();
 }
 
 // ── Collision ─────────────────────────────────────────────────────────────────
@@ -780,6 +803,226 @@ function detectDangerZone(pos, floor) {
         const hw = (z.width ?? 4) / 2, hd = (z.depth ?? 4) / 2;
         return pos.x >= z.x - hw && pos.x <= z.x + hw && pos.z >= z.z - hd && pos.z <= z.z + hd;
     }) ?? null;
+}
+
+function distanceToSegment(px, pz, ax, az, bx, bz) {
+    const vx = bx - ax;
+    const vz = bz - az;
+    const wx = px - ax;
+    const wz = pz - az;
+    const c1 = vx * wx + vz * wz;
+    if (c1 <= 0) return { distance: Math.hypot(px - ax, pz - az), point: { x: ax, z: az } };
+    const c2 = vx * vx + vz * vz;
+    if (c2 <= c1) return { distance: Math.hypot(px - bx, pz - bz), point: { x: bx, z: bz } };
+    const t = c1 / c2;
+    const point = { x: ax + t * vx, z: az + t * vz };
+    return { distance: Math.hypot(px - point.x, pz - point.z), point };
+}
+
+function getZoneReferencePoint(zone, pos) {
+    if (zone.shape === 'circle') {
+        const dx = zone.x - pos.x;
+        const dz = zone.z - pos.z;
+        const len = Math.hypot(dx, dz) || 1;
+        return { x: zone.x - (dx / len) * (zone.radius ?? 4), z: zone.z - (dz / len) * (zone.radius ?? 4) };
+    }
+    if (zone.shape === 'polygon' && Array.isArray(zone.points) && zone.points.length >= 3) {
+        let closest = { distance: Infinity, point: { x: zone.x, z: zone.z } };
+        for (let i = 0; i < zone.points.length; i++) {
+            const a = zone.points[i];
+            const b = zone.points[(i + 1) % zone.points.length];
+            const candidate = distanceToSegment(pos.x, pos.z, a.x, a.z, b.x, b.z);
+            if (candidate.distance < closest.distance) closest = candidate;
+        }
+        return closest.point;
+    }
+    const halfWidth = (zone.width ?? 4) / 2;
+    const halfDepth = (zone.depth ?? 4) / 2;
+    return {
+        x: THREE.MathUtils.clamp(pos.x, zone.x - halfWidth, zone.x + halfWidth),
+        z: THREE.MathUtils.clamp(pos.z, zone.z - halfDepth, zone.z + halfDepth)
+    };
+}
+
+function describeDirection(dx, dz) {
+    const horizontal = Math.abs(dx) < 0.35 ? '' : dx > 0 ? 'east' : 'west';
+    const vertical = Math.abs(dz) < 0.35 ? '' : dz > 0 ? 'north' : 'south';
+    if (horizontal && vertical) return `${vertical}-${horizontal}`;
+    if (horizontal) return horizontal;
+    if (vertical) return vertical;
+    return 'here';
+}
+
+function getDangerHint(pos, floor) {
+    const zones = dangerZones.filter(z => z.enabled && z.floorNumber === floor);
+    if (!zones.length) {
+        return { text: 'No active geo-fence nearby.', level: 'safe', nearestDistance: Infinity };
+    }
+
+    const inside = detectDangerZone(pos, floor);
+    if (inside) {
+        return { text: `Inside danger zone: ${inside.name}. Leave immediately.`, level: 'inside', nearestDistance: 0 };
+    }
+
+    let nearest = null;
+    for (const zone of zones) {
+        const ref = getZoneReferencePoint(zone, pos);
+        const dx = ref.x - pos.x;
+        const dz = ref.z - pos.z;
+        const distance = Math.hypot(dx, dz);
+        if (!nearest || distance < nearest.distance) {
+            nearest = { zone, dx, dz, distance };
+        }
+    }
+
+    if (!nearest) {
+        return { text: 'No active geo-fence nearby.', level: 'safe', nearestDistance: Infinity };
+    }
+
+    const level = nearest.distance <= DANGER_NEAR_DISTANCE
+        ? 'near'
+        : nearest.distance <= DANGER_FAR_DISTANCE
+            ? 'far'
+            : 'safe';
+    return {
+        text: `${nearest.zone.name}: ${nearest.distance.toFixed(1)}m ${describeDirection(nearest.dx, nearest.dz)}.`,
+        level,
+        nearestDistance: nearest.distance
+    };
+}
+
+function getDangerLevelColor(level) {
+    if (level === 'inside') return { fill: 'rgba(255,94,106,0.24)', stroke: 'rgba(255,94,106,0.95)' };
+    if (level === 'near') return { fill: 'rgba(255,154,119,0.22)', stroke: 'rgba(255,154,119,0.92)' };
+    if (level === 'far') return { fill: 'rgba(255,214,125,0.2)', stroke: 'rgba(255,214,125,0.9)' };
+    return { fill: 'rgba(255,94,106,0.14)', stroke: 'rgba(255,94,106,0.7)' };
+}
+
+function setDangerHintLevel(level) {
+    dangerHintPanelEl.classList.remove('level-far', 'level-near', 'level-inside');
+    if (level === 'far') dangerHintPanelEl.classList.add('level-far');
+    if (level === 'near') dangerHintPanelEl.classList.add('level-near');
+    if (level === 'inside') dangerHintPanelEl.classList.add('level-inside');
+}
+
+function maybePublishDangerAlert(zone) {
+    if (!zone || !solaceBridge?.isConnected()) return;
+    const key = `${userId}|${zone.id ?? zone.name}`;
+    const now = Date.now();
+    const last = lastAlertPublishedAt.get(key) ?? 0;
+    if (now - last < ALERT_PUBLISH_COOLDOWN_MS) return;
+    lastAlertPublishedAt.set(key, now);
+    solaceBridge.publish(TOPICS.userAlert(userId), {
+        userId,
+        zoneId: zone.id ?? zone.name,
+        zoneName: zone.name,
+        floor: currentFloor.number,
+        x: parseFloat(player.position.x.toFixed(2)),
+        z: parseFloat(player.position.z.toFixed(2)),
+        timestamp: new Date().toISOString()
+    });
+}
+
+function drawMiniMap(dangerLevel = 'safe') {
+    const ctx = miniMapCtx;
+    const width = miniMapCanvasEl.width;
+    const height = miniMapCanvasEl.height;
+    const dangerColors = getDangerLevelColor(dangerLevel);
+    ctx.clearRect(0, 0, width, height);
+
+    ctx.fillStyle = 'rgba(7,16,25,0.96)';
+    ctx.fillRect(0, 0, width, height);
+    ctx.strokeStyle = 'rgba(125,212,255,0.38)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+
+    ctx.fillStyle = 'rgba(54,88,112,0.35)';
+    BASE_ZONES.forEach(zone => {
+        const topLeft = worldToMiniMap(zone.x - zone.width / 2, zone.z + zone.depth / 2);
+        const bottomRight = worldToMiniMap(zone.x + zone.width / 2, zone.z - zone.depth / 2);
+        ctx.fillRect(topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y);
+    });
+
+    ctx.strokeStyle = 'rgba(200,220,235,0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    [
+        [-7, -17, -7, -9], [-7, -5, -7, 5], [-7, 9, -7, 17],
+        [7, -17, 7, -9], [7, -5, 7, 5], [7, 9, 7, 17],
+        [-22, 0, -7, 0], [7, 0, 22, 0]
+    ].forEach(([x1, z1, x2, z2]) => {
+        const a = worldToMiniMap(x1, z1);
+        const b = worldToMiniMap(x2, z2);
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+    });
+    ctx.stroke();
+
+    STAIR_NODES.filter(stair => stair.floorNumber === currentFloor.number).forEach(stair => {
+        const point = worldToMiniMap(stair.localPosition.x, stair.localPosition.z);
+        ctx.beginPath();
+        ctx.fillStyle = '#ffd67d';
+        ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    dangerZones.filter(zone => zone.enabled && zone.floorNumber === currentFloor.number).forEach(zone => {
+        ctx.fillStyle = dangerColors.fill;
+        ctx.strokeStyle = dangerColors.stroke;
+        ctx.lineWidth = 1.25;
+        if (zone.shape === 'circle') {
+            const center = worldToMiniMap(zone.x, zone.z);
+            const edge = worldToMiniMap(zone.x + (zone.radius ?? 4), zone.z);
+            const radius = Math.abs(edge.x - center.x);
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+        } else if (zone.shape === 'polygon' && Array.isArray(zone.points) && zone.points.length >= 3) {
+            ctx.beginPath();
+            zone.points.forEach((point, index) => {
+                const p = worldToMiniMap(point.x, point.z);
+                if (index === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+            });
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        } else {
+            const topLeft = worldToMiniMap(zone.x - (zone.width ?? 4) / 2, zone.z + (zone.depth ?? 4) / 2);
+            const bottomRight = worldToMiniMap(zone.x + (zone.width ?? 4) / 2, zone.z - (zone.depth ?? 4) / 2);
+            ctx.fillRect(topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y);
+            ctx.strokeRect(topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y);
+        }
+    });
+
+    npcActors.filter(npc => npc.floor === currentFloor.number).forEach(npc => {
+        const point = worldToMiniMap(npc.model.position.x, npc.model.position.z);
+        ctx.beginPath();
+        ctx.fillStyle = 'rgba(119,213,255,0.72)';
+        ctx.arc(point.x, point.y, 2.6, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    const playerPoint = worldToMiniMap(player.position.x, player.position.z);
+    ctx.save();
+    ctx.translate(playerPoint.x, playerPoint.y);
+    ctx.rotate(-player.rotation.y);
+    ctx.beginPath();
+    ctx.moveTo(0, -7);
+    ctx.lineTo(4.8, 6);
+    ctx.lineTo(-4.8, 6);
+    ctx.closePath();
+    ctx.fillStyle = '#83f3ae';
+    ctx.fill();
+    ctx.strokeStyle = '#eef7fd';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.fillStyle = 'rgba(149,173,188,0.9)';
+    ctx.font = '10px Bahnschrift, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`${currentFloor.number}F`, 8, 12);
 }
 
 // ── Stair proximity ───────────────────────────────────────────────────────────
@@ -927,6 +1170,7 @@ function onZonesUpdate(_, payload) {
         dangerZones.push(...payload.zones);
         updateDangerZoneVisuals();
     }
+    drawMiniMap();
 }
 
 function onBroadcast(_, payload) {
@@ -1082,16 +1326,18 @@ function gameLoop() {
     const dangerZone = detectDangerZone(player.position, currentFloor.number);
     if (dangerZone) {
         showAlert(dangerZone.name);
-        // publish alert event (debounce handled by showAlert)
-        if (solaceBridge?.isConnected() && alertActive && activeAlertZoneId === dangerZone.name) {
-            // Only publish once per entry (not every frame)
-        }
+        maybePublishDangerAlert(dangerZone);
     } else {
         hideAlert();
     }
 
+    const hint = getDangerHint(player.position, currentFloor.number);
+    dangerHintTextEl.textContent = hint.text;
+    setDangerHintLevel(hint.level);
+
     // --- HUD position ---
     hudPosEl.textContent = `${player.position.x.toFixed(1)}, ${player.position.z.toFixed(1)}`;
+    drawMiniMap(hint.level);
 
     // --- Solace publish ---
     publishAccum += dt * 1000;

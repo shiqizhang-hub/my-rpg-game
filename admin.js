@@ -13,6 +13,9 @@ const toolSelectBtn     = document.querySelector('#toolSelect');
 const toolDrawRectBtn   = document.querySelector('#toolDrawRect');
 const toolDrawCircleBtn = document.querySelector('#toolDrawCircle');
 const toolDrawPolyBtn   = document.querySelector('#toolDrawPoly');
+const btnUndoEl         = document.querySelector('#btnUndo');
+const btnRedoEl         = document.querySelector('#btnRedo');
+const btnAutoPublishEl  = document.querySelector('#btnAutoPublish');
 const btnPublishZones   = document.querySelector('#btnPublishZones');
 const btnExportZones    = document.querySelector('#btnExportZones');
 const btnImportZones    = document.querySelector('#btnImportZones');
@@ -23,11 +26,22 @@ const userCountEl       = document.querySelector('#userCountBadge');
 const zoneListEl        = document.querySelector('#zoneList');
 const zoneCountEl       = document.querySelector('#zoneCountBadge');
 const alertLogEl        = document.querySelector('#alertLog');
+const alertFilterUserEl = document.querySelector('#alertFilterUser');
+const alertFilterFloorEl = document.querySelector('#alertFilterFloor');
+const alertTimeWindowEl = document.querySelector('#alertTimeWindow');
+const alertTimeStartEl  = document.querySelector('#alertTimeStart');
+const alertTimeEndEl    = document.querySelector('#alertTimeEnd');
+const alertFilterCountEl = document.querySelector('#alertFilterCount');
 const broadcastInputEl  = document.querySelector('#broadcastInput');
 const btnBroadcast      = document.querySelector('#btnBroadcast');
 const btnAddSim         = document.querySelector('#btnAddSim');
 const btnClearSim       = document.querySelector('#btnClearSim');
 const btnClearLog       = document.querySelector('#btnClearLog');
+const snapshotNameEl    = document.querySelector('#snapshotName');
+const snapshotSelectEl  = document.querySelector('#snapshotSelect');
+const btnSaveSnapshotEl = document.querySelector('#btnSaveSnapshot');
+const btnLoadSnapshotEl = document.querySelector('#btnLoadSnapshot');
+const btnDeleteSnapshotEl = document.querySelector('#btnDeleteSnapshot');
 const connPanelEl       = document.querySelector('#connPanel');
 const connPanelToggle   = document.querySelector('#connPanelToggle');
 const cfUrlEl           = document.querySelector('#cfUrl');
@@ -121,6 +135,16 @@ let draggingVertex = null; // { zoneId, vertexIndex }
 let selectedZoneId = null;
 let draggingZone = null;   // { zoneId, mode:'move'|'resize-rect'|'resize-circle', grabOffsetX?, grabOffsetZ? }
 let editingZoneId = null; // null = new, string = edit
+let zoneHistory = [];
+let zoneHistoryIndex = -1;
+let autoPublishEnabled = true;
+let zoneSnapshots = [];
+const ALERT_COOLDOWN_MS = 15000;
+const lastAlertByUserZone = new Map();
+const alertStatsByUserZone = new Map();
+const alertLogEntries = [];
+const SNAPSHOT_STORAGE_KEY = 'hospital-admin-zone-snapshots';
+let alertFocus = null;
 
 /** @type {Map<string, {userId,floor,x,z,zone,status,lastSeen,color,ghost?:boolean}>} */
 const users = new Map();
@@ -131,6 +155,157 @@ const dangerZones = [];
 let solaceBridge = null;
 let simInterval = null;
 let simUsers = [];
+
+function serializeZones() {
+    return JSON.stringify(dangerZones.map(z => ({
+        id: z.id,
+        name: z.name,
+        type: z.type,
+        floorNumber: z.floorNumber,
+        x: z.x,
+        z: z.z,
+        shape: z.shape,
+        width: z.width,
+        depth: z.depth,
+        radius: z.radius,
+        points: z.points ? z.points.map(p => ({ x: p.x, z: p.z })) : [],
+        warningText: z.warningText,
+        color: z.color,
+        enabled: z.enabled
+    })));
+}
+
+function loadZonesFromSerialized(serialized) {
+    const data = JSON.parse(serialized);
+    dangerZones.length = 0;
+    data.forEach(z => dangerZones.push(z));
+}
+
+function refreshHistoryButtons() {
+    btnUndoEl.disabled = zoneHistoryIndex <= 0;
+    btnRedoEl.disabled = zoneHistoryIndex >= zoneHistory.length - 1;
+}
+
+function commitZoneHistory() {
+    const snapshot = serializeZones();
+    if (zoneHistory[zoneHistoryIndex] === snapshot) {
+        refreshHistoryButtons();
+        return;
+    }
+    zoneHistory = zoneHistory.slice(0, zoneHistoryIndex + 1);
+    zoneHistory.push(snapshot);
+    zoneHistoryIndex = zoneHistory.length - 1;
+    refreshHistoryButtons();
+}
+
+function refreshAutoPublishButton() {
+    btnAutoPublishEl.textContent = `Auto Publish: ${autoPublishEnabled ? 'ON' : 'OFF'}`;
+    btnAutoPublishEl.classList.toggle('toggleOn', autoPublishEnabled);
+}
+
+function publishZones({ silent = false } = {}) {
+    if (!solaceBridge?.isConnected()) {
+        if (!silent) alert('Not connected to Solace. Please connect first.');
+        return false;
+    }
+    solaceBridge.publish(TOPICS.zonesUpdate, {
+        zones: dangerZones,
+        timestamp: new Date().toISOString()
+    });
+    mapHintEl.textContent = `✓ Pushed ${dangerZones.length} geo-fence(s) to user endpoints`;
+    setTimeout(() => { mapHintEl.textContent = DRAW_HINTS[drawShape] ?? ''; }, 3000);
+    return true;
+}
+
+function applyZoneMutation({ skipAutoPublish = false } = {}) {
+    commitZoneHistory();
+    if (autoPublishEnabled && !skipAutoPublish) publishZones({ silent: true });
+}
+
+function saveSnapshotsToStorage() {
+    try { localStorage.setItem(SNAPSHOT_STORAGE_KEY, JSON.stringify(zoneSnapshots)); } catch { /* ignore */ }
+}
+
+function loadSnapshotsFromStorage() {
+    try {
+        const raw = localStorage.getItem(SNAPSHOT_STORAGE_KEY);
+        zoneSnapshots = raw ? JSON.parse(raw) : [];
+        if (!Array.isArray(zoneSnapshots)) zoneSnapshots = [];
+    } catch {
+        zoneSnapshots = [];
+    }
+}
+
+function refreshSnapshotSelect() {
+    snapshotSelectEl.innerHTML = '';
+    if (zoneSnapshots.length === 0) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'No snapshots';
+        snapshotSelectEl.appendChild(option);
+        snapshotSelectEl.disabled = true;
+        return;
+    }
+    snapshotSelectEl.disabled = false;
+    zoneSnapshots.forEach(s => {
+        const option = document.createElement('option');
+        option.value = s.id;
+        option.textContent = `${s.name} · ${new Date(s.createdAt).toLocaleTimeString('en-US', { hour12: false })}`;
+        snapshotSelectEl.appendChild(option);
+    });
+}
+
+function saveCurrentSnapshot() {
+    const name = snapshotNameEl.value.trim() || `snapshot-${new Date().toLocaleTimeString('en-US', { hour12: false })}`;
+    const snapshot = {
+        id: `snapshot_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name,
+        createdAt: new Date().toISOString(),
+        data: serializeZones()
+    };
+    zoneSnapshots.unshift(snapshot);
+    if (zoneSnapshots.length > 30) zoneSnapshots = zoneSnapshots.slice(0, 30);
+    saveSnapshotsToStorage();
+    refreshSnapshotSelect();
+    snapshotSelectEl.value = snapshot.id;
+    snapshotNameEl.value = '';
+}
+
+function loadSelectedSnapshot() {
+    const id = snapshotSelectEl.value;
+    if (!id) return;
+    const target = zoneSnapshots.find(s => s.id === id);
+    if (!target) return;
+    loadZonesFromSerialized(target.data);
+    selectedZoneId = null;
+    editingZoneId = null;
+    applyZoneMutation();
+    renderAll();
+    updateZoneList();
+}
+
+function deleteSelectedSnapshot() {
+    const id = snapshotSelectEl.value;
+    if (!id) return;
+    zoneSnapshots = zoneSnapshots.filter(s => s.id !== id);
+    saveSnapshotsToStorage();
+    refreshSnapshotSelect();
+}
+
+function restoreZoneHistory(index) {
+    if (index < 0 || index >= zoneHistory.length) return;
+    zoneHistoryIndex = index;
+    loadZonesFromSerialized(zoneHistory[zoneHistoryIndex]);
+    selectedZoneId = null;
+    editingZoneId = null;
+    renderAll();
+    updateZoneList();
+    refreshHistoryButtons();
+    if (autoPublishEnabled) publishZones({ silent: true });
+}
+
+function undoZoneChange() { restoreZoneHistory(zoneHistoryIndex - 1); }
+function redoZoneChange() { restoreZoneHistory(zoneHistoryIndex + 1); }
 
 // Stale user cleanup (remove after 15s no updates)
 setInterval(() => {
@@ -166,7 +341,39 @@ function renderAll() {
     drawStairs();
     drawDangerZones();
     drawUsers();
+    drawAlertFocus();
     drawDrawingPreview();
+}
+
+function drawAlertFocus() {
+    if (!alertFocus || alertFocus.floor !== currentFloor) return;
+    const remaining = alertFocus.until - performance.now();
+    if (remaining <= 0) {
+        alertFocus = null;
+        return;
+    }
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.018);
+    const c = toCanvas(alertFocus.x, alertFocus.z);
+    const radius = Math.max(10, mapScale * (1.6 + pulse * 1.1));
+
+    ctx.save();
+    ctx.strokeStyle = `rgba(255,214,125,${0.45 + pulse * 0.45})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, radius * 1.6, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = `rgba(255,94,106,${0.35 + pulse * 0.55})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = `rgba(255,255,255,${0.4 + pulse * 0.45})`;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
 }
 
 function drawBackground() {
@@ -447,6 +654,17 @@ toolDrawRectBtn.addEventListener('click',   () => setActiveTool('rect'));
 toolDrawCircleBtn.addEventListener('click', () => setActiveTool('circle'));
 toolDrawPolyBtn.addEventListener('click',   () => setActiveTool('polygon'));
 
+btnUndoEl.addEventListener('click', undoZoneChange);
+btnRedoEl.addEventListener('click', redoZoneChange);
+btnAutoPublishEl.addEventListener('click', () => {
+    autoPublishEnabled = !autoPublishEnabled;
+    refreshAutoPublishButton();
+    if (autoPublishEnabled) publishZones({ silent: true });
+});
+btnSaveSnapshotEl.addEventListener('click', saveCurrentSnapshot);
+btnLoadSnapshotEl.addEventListener('click', loadSelectedSnapshot);
+btnDeleteSnapshotEl.addEventListener('click', deleteSelectedSnapshot);
+
 // ── Canvas mouse events ────────────────────────────────────────────────────────
 function getCanvasPos(e) {
     const rect = canvas.getBoundingClientRect();
@@ -497,7 +715,6 @@ function pointToSegmentDistance(px, py, ax, ay, bx, by) {
 
 function findEdgeInsertIndex(zone, cx, cy, threshold = 10) {
     if (!zone?.points || zone.points.length < 2) return -1;
-    const c = toCanvas(zone.x, zone.z);
     let best = threshold;
     let bestIndex = -1;
     for (let i = 0; i < zone.points.length; i++) {
@@ -625,6 +842,7 @@ canvas.addEventListener('mousedown', e => {
                 if (edgeIndex >= 0) {
                     hit.points.splice(edgeIndex + 1, 0, { x: wx, z: wz });
                     recenterPolygon(hit);
+                    applyZoneMutation();
                     renderAll();
                     updateZoneList();
                     return;
@@ -719,6 +937,7 @@ canvas.addEventListener('mouseup', e => {
     if (draggingZone) {
         draggingZone = null;
         canvas.style.cursor = activeTool === 'select' ? 'default' : 'crosshair';
+        applyZoneMutation();
         updateZoneList();
         renderAll();
         return;
@@ -726,6 +945,7 @@ canvas.addEventListener('mouseup', e => {
     if (draggingVertex) {
         draggingVertex = null;
         canvas.style.cursor = 'default';
+        applyZoneMutation();
         updateZoneList();
         renderAll();
         return;
@@ -818,17 +1038,31 @@ canvas.addEventListener('contextmenu', e => {
     hit.points.splice(vertexIndex, 1);
     recenterPolygon(hit);
     selectedZoneId = hit.id;
+    applyZoneMutation();
     renderAll();
     updateZoneList();
 });
 
 // Delete key removes selected zone
 window.addEventListener('keydown', e => {
+    const isUndo = (e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z';
+    const isRedo = (e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'));
+    if (isUndo) {
+        e.preventDefault();
+        undoZoneChange();
+        return;
+    }
+    if (isRedo) {
+        e.preventDefault();
+        redoZoneChange();
+        return;
+    }
     if ((e.key === 'Delete' || e.key === 'Backspace') && selectedZoneId) {
         const idx = dangerZones.findIndex(z => z.id === selectedZoneId);
         if (idx !== -1) {
             dangerZones.splice(idx, 1);
             selectedZoneId = null;
+            applyZoneMutation();
             renderAll();
             updateZoneList();
         }
@@ -930,6 +1164,7 @@ btnModalSave.addEventListener('click', () => {
 
     zoneModalEl.classList.remove('open');
     editingZoneId = null;
+    applyZoneMutation();
     renderAll();
     updateZoneList();
 });
@@ -976,6 +1211,7 @@ function updateZoneList() {
         toggle.addEventListener('click', e => {
             e.stopPropagation();
             z.enabled = !z.enabled;
+            applyZoneMutation();
             updateZoneList();
             renderAll();
         });
@@ -987,6 +1223,8 @@ function updateZoneList() {
             e.stopPropagation();
             const idx = dangerZones.findIndex(d => d.id === z.id);
             if (idx !== -1) dangerZones.splice(idx, 1);
+            if (selectedZoneId === z.id) selectedZoneId = null;
+            applyZoneMutation();
             updateZoneList();
             renderAll();
         });
@@ -1041,24 +1279,175 @@ function escHtml(s) {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
-// ── Alert log ─────────────────────────────────────────────────────────────────
-function addAlertLog(userId, zoneName, floor, x, z) {
-    const entry = document.createElement('div');
-    entry.className = 'alertEntry';
-    const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-    entry.innerHTML = `<div class="aTime">${time}</div>
-      <div class="aText">⚠ ${escHtml(userId.split('_')[0])} entered "${escHtml(zoneName)}" (${floor}F)</div>`;
-    entry.addEventListener('click', () => {
-        currentFloor = floor;
-        floorTabEls.forEach(t => t.classList.toggle('active', parseInt(t.dataset.floor,10) === currentFloor));
-        renderAll();
-    });
-    alertLogEl.insertBefore(entry, alertLogEl.firstChild);
-    // keep max 80 entries
-    while (alertLogEl.children.length > 80) alertLogEl.removeChild(alertLogEl.lastChild);
+function formatClock(ms) {
+    return new Date(ms).toLocaleTimeString('en-US', { hour12: false });
 }
 
-btnClearLog.addEventListener('click', () => { alertLogEl.innerHTML = ''; });
+function parseDateTimeInput(value) {
+    if (!value) return null;
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getAlertTimeWindow() {
+    const mode = alertTimeWindowEl.value;
+    const now = Date.now();
+    if (mode === 'custom') {
+        const start = parseDateTimeInput(alertTimeStartEl.value);
+        const end = parseDateTimeInput(alertTimeEndEl.value);
+        return { start, end };
+    }
+    if (mode === 'this-hour') {
+        const start = new Date();
+        start.setMinutes(0, 0, 0);
+        return { start: start.getTime(), end: now };
+    }
+    if (mode === 'today') {
+        const start = new Date();
+        start.setHours(0, 0, 0, 0);
+        return { start: start.getTime(), end: now };
+    }
+    if (mode === 'this-shift') {
+        const start = new Date();
+        const currentHour = start.getHours();
+        const shiftStartHour = currentHour < 8 ? 0 : currentHour < 16 ? 8 : 16;
+        start.setHours(shiftStartHour, 0, 0, 0);
+        return { start: start.getTime(), end: now };
+    }
+    const presetMap = {
+        '5m': 5 * 60 * 1000,
+        '15m': 15 * 60 * 1000,
+        '30m': 30 * 60 * 1000,
+        '1h': 60 * 60 * 1000,
+        '6h': 6 * 60 * 60 * 1000,
+        '24h': 24 * 60 * 60 * 1000,
+    };
+    const duration = presetMap[mode];
+    if (!duration) return { start: null, end: null };
+    return { start: now - duration, end: now };
+}
+
+function refreshAlertTimeInputs() {
+    const isCustom = alertTimeWindowEl.value === 'custom';
+    alertTimeStartEl.classList.toggle('timeInactive', !isCustom);
+    alertTimeEndEl.classList.toggle('timeInactive', !isCustom);
+}
+
+function activateCustomTimeRange() {
+    if (alertTimeWindowEl.value !== 'custom') {
+        alertTimeWindowEl.value = 'custom';
+    }
+    refreshAlertTimeInputs();
+}
+
+function updateAlertStat(userId, zoneName, floor, x, z) {
+    const key = `${userId}|${zoneName}`;
+    const now = Date.now();
+    const existing = alertStatsByUserZone.get(key);
+    if (!existing) {
+        const created = {
+            userId,
+            zoneName,
+            firstAt: now,
+            lastAt: now,
+            count: 1,
+            floor,
+            x,
+            z
+        };
+        alertStatsByUserZone.set(key, created);
+        return created;
+    }
+    existing.lastAt = now;
+    existing.count += 1;
+    existing.floor = floor;
+    existing.x = x;
+    existing.z = z;
+    return existing;
+}
+
+function focusAlertLocation(floor, x, z) {
+    currentFloor = floor;
+    floorTabEls.forEach(t => t.classList.toggle('active', parseInt(t.dataset.floor, 10) === currentFloor));
+    alertFocus = {
+        floor,
+        x,
+        z,
+        until: performance.now() + 2800
+    };
+    renderAll();
+}
+
+function renderAlertLog() {
+    const userFilter = alertFilterUserEl.value.trim().toLowerCase();
+    const floorFilter = alertFilterFloorEl.value;
+    const { start: timeStart, end: timeEnd } = getAlertTimeWindow();
+    alertLogEl.innerHTML = '';
+    const totalEntries = alertLogEntries.length;
+
+    const filteredEntries = alertLogEntries.filter(entry => {
+        const userMatch = !userFilter || entry.displayUser.toLowerCase().includes(userFilter);
+        const floorMatch = !floorFilter || String(entry.floor) === floorFilter;
+        const afterStart = timeStart == null || entry.loggedAt >= timeStart;
+        const beforeEnd = timeEnd == null || entry.loggedAt <= timeEnd;
+        return userMatch && floorMatch && afterStart && beforeEnd;
+    });
+
+    alertFilterCountEl.textContent = `${filteredEntries.length} / ${totalEntries}`;
+
+    filteredEntries.forEach(entry => {
+        const row = document.createElement('div');
+        row.className = 'alertEntry';
+        const metaLine = `<div class="aMeta">first ${formatClock(entry.firstAt)} · last ${formatClock(entry.lastAt)} · count ${entry.count}</div>`;
+        row.innerHTML = `<div class="aTime">${formatClock(entry.loggedAt)}</div>
+      <div class="aText">⚠ ${escHtml(entry.displayUser)} entered "${escHtml(entry.zoneName)}" (${entry.floor}F)</div>
+      ${metaLine}`;
+        row.addEventListener('click', () => focusAlertLocation(entry.floor, entry.x, entry.z));
+        alertLogEl.appendChild(row);
+    });
+}
+
+// ── Alert log ─────────────────────────────────────────────────────────────────
+function addAlertLog(userId, zoneName, floor, x, z, stats = null) {
+    const displayUser = userId.split('_')[0];
+    alertLogEntries.unshift({
+        userId,
+        displayUser,
+        zoneName,
+        floor,
+        x,
+        z,
+        firstAt: stats?.firstAt ?? Date.now(),
+        lastAt: stats?.lastAt ?? Date.now(),
+        count: stats?.count ?? 1,
+        loggedAt: Date.now()
+    });
+    while (alertLogEntries.length > 80) alertLogEntries.pop();
+    renderAlertLog();
+}
+
+btnClearLog.addEventListener('click', () => {
+    alertLogEntries.length = 0;
+    alertLogEl.innerHTML = '';
+    lastAlertByUserZone.clear();
+    alertStatsByUserZone.clear();
+});
+alertFilterUserEl.addEventListener('input', renderAlertLog);
+alertFilterFloorEl.addEventListener('change', renderAlertLog);
+alertTimeWindowEl.addEventListener('change', () => {
+    refreshAlertTimeInputs();
+    renderAlertLog();
+});
+
+function handleCustomTimeInput() {
+    activateCustomTimeRange();
+    renderAlertLog();
+}
+
+alertTimeStartEl.addEventListener('input', handleCustomTimeInput);
+alertTimeStartEl.addEventListener('change', handleCustomTimeInput);
+alertTimeEndEl.addEventListener('input', handleCustomTimeInput);
+alertTimeEndEl.addEventListener('change', handleCustomTimeInput);
 
 // ── Solace handlers ────────────────────────────────────────────────────────────
 function onPositionUpdate(topic, payload) {
@@ -1083,30 +1472,25 @@ function onPositionUpdate(topic, payload) {
 
 function onAlertUpdate(topic, payload) {
     if (!payload?.userId) return;
-    addAlertLog(payload.userId, payload.zoneName ?? 'Unknown Zone', payload.floor ?? 1, payload.x ?? 0, payload.z ?? 0);
+    const zoneName = payload.zoneName ?? 'Unknown Zone';
+    const dedupeKey = `${payload.userId}|${zoneName}`;
+    const now = Date.now();
+    const last = lastAlertByUserZone.get(dedupeKey) ?? 0;
+    if (now - last < ALERT_COOLDOWN_MS) return;
+    lastAlertByUserZone.set(dedupeKey, now);
+    const stat = updateAlertStat(payload.userId, zoneName, payload.floor ?? 1, payload.x ?? 0, payload.z ?? 0);
+    addAlertLog(payload.userId, zoneName, payload.floor ?? 1, payload.x ?? 0, payload.z ?? 0, stat);
     // Send admin alert back to that user
     if (solaceBridge?.isConnected()) {
         solaceBridge.publish(TOPICS.alertToUser(payload.userId), {
-            text: `You have entered a restricted zone: ${payload.zoneName}`,
+            text: `You have entered a restricted zone: ${zoneName}`,
             timestamp: new Date().toISOString()
         });
     }
 }
 
 // ── Publish zones to users ─────────────────────────────────────────────────────
-function publishZones() {
-    if (!solaceBridge?.isConnected()) {
-        alert('Not connected to Solace. Please connect first.');
-        return;
-    }
-    solaceBridge.publish(TOPICS.zonesUpdate, {
-        zones: dangerZones,
-        timestamp: new Date().toISOString()
-    });
-    mapHintEl.textContent = `✓ Pushed ${dangerZones.length} geo-fence(s) to user endpoints`;
-    setTimeout(() => { mapHintEl.textContent = DRAW_HINTS[drawShape] ?? ''; }, 3000);
-}
-btnPublishZones.addEventListener('click', publishZones);
+btnPublishZones.addEventListener('click', () => publishZones());
 
 // ── Export / import ────────────────────────────────────────────────────────────
 btnExportZones.addEventListener('click', () => {
@@ -1142,6 +1526,7 @@ fileImportEl.addEventListener('change', e => {
                 color: z.color ?? '#ff5e6a',
                 enabled: z.enabled !== false
             }));
+            applyZoneMutation();
             renderAll();
             updateZoneList();
         } catch (err) {
@@ -1306,5 +1691,10 @@ function animationLoop() {
 animationLoop();
 
 // Initial sidebar renders
+commitZoneHistory();
+refreshAutoPublishButton();
+loadSnapshotsFromStorage();
+refreshSnapshotSelect();
+refreshAlertTimeInputs();
 updateZoneList();
 updateUserList();

@@ -149,6 +149,59 @@
         color: var(--muted);
       }
 
+      #miniMapPanel {
+        top: 18px; right: 18px;
+        width: 190px;
+        padding: 14px 14px 12px;
+        pointer-events: none;
+      }
+      #miniMapTitle {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: .08em;
+        margin-bottom: 8px;
+      }
+      #miniMapCanvas {
+        width: 160px;
+        height: 160px;
+        border-radius: 8px;
+        border: 1px solid var(--line-strong);
+        background: rgba(6,12,18,.76);
+        display: block;
+        margin: 0 auto;
+      }
+      #dangerHintPanel {
+        right: 18px; top: 228px;
+        width: 190px;
+        padding: 14px 14px 12px;
+        pointer-events: none;
+      }
+      #dangerHintLabel {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: .08em;
+        margin-bottom: 6px;
+      }
+      #dangerHintText {
+        font-size: 12px;
+        line-height: 1.35;
+        color: var(--text);
+      }
+      #dangerHintPanel.level-far {
+        border-color: rgba(255,214,125,.65);
+      }
+      #dangerHintPanel.level-near {
+        border-color: rgba(255,154,119,.75);
+      }
+      #dangerHintPanel.level-inside {
+        border-color: rgba(255,94,106,.85);
+      }
+      #dangerHintPanel.level-far #dangerHintText { color: var(--warn); }
+      #dangerHintPanel.level-near #dangerHintText { color: #ffb08e; }
+      #dangerHintPanel.level-inside #dangerHintText { color: #ff8f98; }
+
       /* ── Alert overlay ─────────────────────────────────────── */
       #alertOverlay {
         position: fixed; inset: 0; z-index: 100; pointer-events: none;
@@ -243,6 +296,14 @@
         <div class="row"><span class="label">Zone</span><span class="value" id="hudZone">—</span></div>
         <div class="row"><span class="label">Position</span><span class="value" id="hudPos">—</span></div>
         <div class="row"><span class="label">Status</span><span id="connBadge">Offline</span></div>
+      </div>
+      <div class="panel" id="miniMapPanel">
+        <div id="miniMapTitle">Floor Mini-Map</div>
+        <canvas id="miniMapCanvas" width="160" height="160"></canvas>
+      </div>
+      <div class="panel" id="dangerHintPanel">
+        <div id="dangerHintLabel">Danger Direction</div>
+        <div id="dangerHintText">No active geo-fence nearby.</div>
       </div>
       <div class="panel" id="keyhint">
         WASD Move &nbsp;·&nbsp; Drag to Rotate Camera &nbsp;·&nbsp; Scroll to Zoom &nbsp;·&nbsp; E Confirm Stair Transfer
