@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>User View — Hospital Tracking</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg-0: #071019;
+        --bg-1: rgba(10,20,31,0.88);
+        --bg-2: rgba(14,28,41,0.96);
+        --line: rgba(133,201,242,0.24);
+        --line-strong: rgba(125,212,255,0.52);
+        --text: #eef7fd;
+        --muted: #95adbc;
+        --accent: #77d5ff;
+        --ok: #83f3ae;
+        --warn: #ffd67d;
+        --danger: #ff5e6a;
+        --shadow: rgba(0,0,0,0.48);
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        overflow: hidden;
+        font-family: "Bahnschrift","Trebuchet MS","PingFang SC","Microsoft YaHei",sans-serif;
+        background: radial-gradient(circle at top,rgba(74,142,182,.18),transparent 34%),
+                    linear-gradient(180deg,#0a1621 0%,#071019 52%,#050b11 100%);
+        color: var(--text);
+      }
+      #app, canvas { display: block; width: 100vw; height: 100vh; }
+
+      /* ── Login overlay ─────────────────────────────────────── */
+      #loginOverlay {
+        position: fixed; inset: 0; z-index: 200;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(4,10,16,.92);
+        backdrop-filter: blur(8px);
+      }
+      #loginBox {
+        background: var(--bg-2);
+        border: 1px solid var(--line-strong);
+        border-radius: 12px;
+        padding: 32px 36px;
+        width: min(420px, 92vw);
+        box-shadow: 0 24px 56px var(--shadow);
+      }
+      #loginBox h1 {
+        font-size: 18px; letter-spacing: .12em; text-transform: uppercase;
+        color: var(--accent); margin-bottom: 24px; text-align: center;
+      }
+      .formRow { margin-bottom: 14px; }
+      .formRow label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; letter-spacing: .06em; text-transform: uppercase; }
+      .formRow input {
+        width: 100%; padding: 9px 12px; background: rgba(255,255,255,.06);
+        border: 1px solid var(--line-strong); border-radius: 6px;
+        color: var(--text); font-size: 14px; outline: none;
+        font-family: inherit;
+        transition: border-color .2s;
+      }
+      .formRow input:focus { border-color: var(--accent); }
+      .formRow input::placeholder { color: var(--muted); }
+      #btnEnter {
+        margin-top: 6px; width: 100%; padding: 11px;
+        background: linear-gradient(135deg,#1e6a9e,#1557a0);
+        border: 1px solid var(--accent); border-radius: 7px;
+        color: var(--text); font-size: 14px; font-family: inherit;
+        letter-spacing: .08em; cursor: pointer;
+        transition: opacity .2s;
+      }
+      #btnEnter:hover { opacity: .85; }
+      #loginError { margin-top: 10px; font-size: 13px; color: var(--danger); min-height: 18px; text-align: center; }
+
+      /* ── HUD ───────────────────────────────────────────────── */
+      #hud {
+        position: fixed; inset: 0; pointer-events: none;
+      }
+
+      .panel {
+        position: absolute;
+        backdrop-filter: blur(10px);
+        border: 1px solid var(--line-strong);
+        background: linear-gradient(180deg,rgba(125,212,255,.07),transparent 18%),
+                    linear-gradient(180deg,var(--bg-2),var(--bg-1));
+        border-radius: 8px;
+        box-shadow: 0 14px 32px var(--shadow);
+        overflow: hidden;
+      }
+      .panel::after {
+        content:''; position:absolute; left:0; top:0; width:100%; height:4px;
+        background: linear-gradient(90deg,var(--accent),rgba(255,210,120,.7));
+      }
+
+      /* top-left info */
+      #infoPanel {
+        top: 18px; left: 18px;
+        width: min(280px, calc(100vw - 32px));
+        padding: 18px 16px 14px;
+        pointer-events: auto;
+      }
+      #infoPanel .row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+      #infoPanel .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+      #infoPanel .value { font-size: 13px; color: var(--text); font-weight: 600; }
+      #connBadge {
+        display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px;
+        background: rgba(255,255,255,.08); color: var(--muted); transition: all .3s;
+      }
+      #connBadge.ok { background: rgba(131,243,174,.16); color: var(--ok); }
+      #connBadge.err { background: rgba(255,94,106,.16); color: var(--danger); }
+
+      /* keybind hint */
+      #keyhint {
+        bottom: 22px; left: 50%; transform: translateX(-50%);
+        padding: 7px 18px; font-size: 12px; color: var(--muted);
+        white-space: nowrap;
+      }
+
+      #stairPrompt {
+        right: 18px; bottom: 18px;
+        width: min(330px, calc(100vw - 36px));
+        padding: 14px 14px 12px;
+        pointer-events: auto;
+        display: none;
+      }
+      #stairPrompt.visible { display: block; }
+      #stairPromptText {
+        font-size: 13px;
+        color: var(--text);
+        margin-bottom: 10px;
+        line-height: 1.35;
+      }
+      #stairPromptBtns { display: flex; gap: 8px; }
+      #stairConfirmBtn, #stairCancelBtn {
+        flex: 1;
+        border-radius: 6px;
+        border: 1px solid var(--line-strong);
+        padding: 8px 10px;
+        font-family: inherit;
+        font-size: 12px;
+        letter-spacing: .05em;
+        cursor: pointer;
+      }
+      #stairConfirmBtn {
+        background: linear-gradient(135deg,#1a6b96,#1755aa);
+        color: var(--text);
+      }
+      #stairCancelBtn {
+        background: rgba(255,255,255,.05);
+        color: var(--muted);
+      }
+
+      /* ── Alert overlay ─────────────────────────────────────── */
+      #alertOverlay {
+        position: fixed; inset: 0; z-index: 100; pointer-events: none;
+        border: 4px solid transparent;
+        transition: border-color .15s;
+      }
+      #alertOverlay.active {
+        border-color: var(--danger);
+        animation: pulseRed 1s ease-in-out infinite;
+      }
+      @keyframes pulseRed {
+        0%,100% { border-color: rgba(255,94,106,.9); }
+        50%      { border-color: rgba(255,94,106,.25); }
+      }
+      #alertBanner {
+        position: fixed; top: 0; left: 0; right: 0; z-index: 101;
+        padding: 14px 24px; text-align: center;
+        background: linear-gradient(135deg,rgba(180,30,40,.92),rgba(140,20,28,.92));
+        font-size: 14px; font-weight: 600; letter-spacing: .08em;
+        transform: translateY(-100%); transition: transform .25s ease;
+        pointer-events: none;
+      }
+      #alertBanner.visible { transform: translateY(0); }
+
+      /* ── Broadcast toast ───────────────────────────────────── */
+      #broadcastToast {
+        position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
+        z-index: 105; pointer-events: none;
+        background: rgba(14,28,41,.96); border: 1px solid var(--accent);
+        border-radius: 8px; padding: 12px 22px; font-size: 13px;
+        max-width: 500px; text-align: center;
+        opacity: 0; transition: opacity .3s;
+        box-shadow: 0 8px 24px rgba(0,0,0,.5);
+      }
+      #broadcastToast.visible { opacity: 1; }
+      #broadcastToast .bcast-label {
+        font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+        color: var(--accent); margin-bottom: 4px;
+      }
+
+      /* ── Crosshair ─────────────────────────────────────────── */
+      #crosshair {
+        position: fixed; top: 50%; left: 50%;
+        transform: translate(-50%,-50%);
+        width: 16px; height: 16px; pointer-events: none;
+      }
+      #crosshair::before, #crosshair::after {
+        content:''; position:absolute; background: rgba(200,240,255,.55);
+      }
+      #crosshair::before { width:2px; height:100%; left:50%; transform: translateX(-50%); }
+      #crosshair::after  { width:100%; height:2px; top:50%; transform: translateY(-50%); }
+    </style>
+  </head>
+  <body>
+    <!-- Login -->
+    <div id="loginOverlay">
+      <div id="loginBox">
+        <h1>Hospital Tracking — User View</h1>
+        <div class="formRow">
+          <label>Username</label>
+          <input id="inputUsername" type="text" placeholder="Your name …" maxlength="24" />
+        </div>
+        <div class="formRow">
+          <label>Solace Server URL</label>
+          <input id="inputUrl" type="text" placeholder="wss://…:443" />
+        </div>
+        <div class="formRow">
+          <label>VPN Name</label>
+          <input id="inputVpn" type="text" placeholder="message-vpn" />
+        </div>
+        <div class="formRow">
+          <label>Solace Username</label>
+          <input id="inputSolaceUser" type="text" placeholder="solace-cloud-client" />
+        </div>
+        <div class="formRow">
+          <label>Solace Password</label>
+          <input id="inputSolacePass" type="password" placeholder="••••••••" />
+        </div>
+        <button id="btnEnter">Enter Scene</button>
+        <div id="loginError"></div>
+      </div>
+    </div>
+
+    <!-- 3-D canvas -->
+    <div id="app"></div>
+
+    <!-- HUD -->
+    <div id="hud">
+      <div class="panel" id="infoPanel">
+        <div class="row"><span class="label">User</span><span class="value" id="hudUser">—</span></div>
+        <div class="row"><span class="label">Floor</span><span class="value" id="hudFloor">—</span></div>
+        <div class="row"><span class="label">Zone</span><span class="value" id="hudZone">—</span></div>
+        <div class="row"><span class="label">Position</span><span class="value" id="hudPos">—</span></div>
+        <div class="row"><span class="label">Status</span><span id="connBadge">Offline</span></div>
+      </div>
+      <div class="panel" id="keyhint">
+        WASD Move &nbsp;·&nbsp; Drag to Rotate Camera &nbsp;·&nbsp; Scroll to Zoom &nbsp;·&nbsp; E Confirm Stair Transfer
+      </div>
+
+      <div class="panel" id="stairPrompt">
+        <div id="stairPromptText">Stair transfer available.</div>
+        <div id="stairPromptBtns">
+          <button id="stairConfirmBtn" type="button">Confirm Transfer (E)</button>
+          <button id="stairCancelBtn" type="button">Not Now</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Alert -->
+    <div id="alertOverlay"></div>
+    <div id="alertBanner">⚠ DANGER ZONE — <span id="alertZoneName"></span></div>
+
+    <!-- Broadcast -->
+    <div id="broadcastToast">
+      <div class="bcast-label">Admin Broadcast</div>
+      <div id="broadcastText"></div>
+    </div>
+
+    <!-- Crosshair -->
+    <div id="crosshair"></div>
+
+    <script type="module" src="./user.js"></script>
+  </body>
+</html>

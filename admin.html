@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin View — Hospital Tracking</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg-0: #071019;
+        --bg-1: rgba(10,20,31,0.92);
+        --bg-2: rgba(14,28,41,0.97);
+        --line: rgba(133,201,242,0.2);
+        --line-strong: rgba(125,212,255,0.46);
+        --text: #eef7fd;
+        --muted: #7e9ab0;
+        --accent: #77d5ff;
+        --ok: #83f3ae;
+        --warn: #ffd67d;
+        --danger: #ff5e6a;
+        --panel-w: 300px;
+        --shadow: rgba(0,0,0,0.5);
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body {
+        font-family: "Bahnschrift","Trebuchet MS","PingFang SC","Microsoft YaHei",sans-serif;
+        background: #071019; color: var(--text); height: 100vh; overflow: hidden;
+        display: flex; flex-direction: column;
+      }
+
+      /* ── Top bar ──────────────────────────────────────────────── */
+      #topBar {
+        height: 50px; flex-shrink: 0;
+        background: var(--bg-2); border-bottom: 1px solid var(--line-strong);
+        display: flex; align-items: center; gap: 14px; padding: 0 18px;
+      }
+      #topBar h1 { font-size: 14px; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); white-space: nowrap; }
+      .topSep { flex: 1; }
+      #connStatus { font-size: 12px; color: var(--muted); }
+      #connStatus span { font-weight: 600; }
+      #connStatus span.ok     { color: var(--ok); }
+      #connStatus span.err    { color: var(--danger); }
+      #connStatus span.connecting { color: var(--warn); }
+
+      /* ── Floor tabs ───────────────────────────────────────────── */
+      #floorTabs {
+        height: 40px; flex-shrink: 0;
+        background: var(--bg-1); border-bottom: 1px solid var(--line);
+        display: flex; align-items: flex-end; padding: 0 16px; gap: 4px;
+      }
+      .floorTab {
+        padding: 6px 18px; font-size: 12px; letter-spacing: .08em;
+        text-transform: uppercase; cursor: pointer; border: none;
+        background: transparent; color: var(--muted); border-bottom: 3px solid transparent;
+        transition: color .2s, border-color .2s;
+        font-family: inherit;
+      }
+      .floorTab:hover { color: var(--text); }
+      .floorTab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+      /* ── Main area ────────────────────────────────────────────── */
+      #mainArea {
+        flex: 1; display: flex; overflow: hidden;
+      }
+
+      /* ── Canvas wrapper ───────────────────────────────────────── */
+      #mapWrapper {
+        flex: 1; position: relative; overflow: hidden; background: #060e16;
+      }
+      #mapCanvas {
+        display: block;
+        cursor: crosshair;
+      }
+      #mapToolbar {
+        position: absolute; top: 12px; left: 12px;
+        display: flex; gap: 6px;
+      }
+      .toolBtn {
+        padding: 7px 14px; font-size: 12px; font-family: inherit;
+        border: 1px solid var(--line-strong); border-radius: 6px;
+        background: var(--bg-2); color: var(--text); cursor: pointer;
+        transition: background .15s, border-color .15s;
+        letter-spacing: .06em;
+      }
+      .toolBtn:hover { background: rgba(125,212,255,.12); }
+      .toolBtn.active { background: rgba(125,212,255,.2); border-color: var(--accent); color: var(--accent); }
+      #mapHint {
+        position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%);
+        font-size: 11px; color: var(--muted); pointer-events: none;
+        background: rgba(6,14,22,.72); padding: 4px 12px; border-radius: 20px;
+      }
+
+      /* ── Right sidebar ────────────────────────────────────────── */
+      #sidebar {
+        width: var(--panel-w); flex-shrink: 0;
+        border-left: 1px solid var(--line);
+        display: flex; flex-direction: column; overflow: hidden;
+      }
+      .sideSection {
+        border-bottom: 1px solid var(--line);
+      }
+      .sideHeader {
+        padding: 10px 14px; font-size: 11px; letter-spacing: .1em;
+        text-transform: uppercase; color: var(--accent);
+        background: rgba(119,213,255,.06);
+        display: flex; align-items: center; justify-content: space-between;
+      }
+      .sideHeader .badge {
+        background: rgba(119,213,255,.14); color: var(--accent);
+        padding: 1px 7px; border-radius: 10px; font-size: 11px;
+      }
+      /* user list */
+      #userListSection { max-height: 280px; display: flex; flex-direction: column; }
+      #userList { flex:1; overflow-y: auto; }
+      .userItem {
+        padding: 8px 14px; border-bottom: 1px solid rgba(133,201,242,.08);
+        cursor: pointer; transition: background .15s;
+        display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center;
+      }
+      .userItem:hover { background: rgba(255,255,255,.04); }
+      .userDot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); flex-shrink: 0; margin-top: 2px; }
+      .userDot.ghost { background: var(--muted); }
+      .userName  { font-size: 13px; color: var(--text); font-weight: 600; }
+      .userMeta  { font-size: 11px; color: var(--muted); margin-top: 2px; }
+      .userFloor { font-size: 11px; color: var(--muted); text-align: right; }
+      /* zone list */
+      #zoneListSection { max-height: 220px; display: flex; flex-direction: column; }
+      #zoneList { flex:1; overflow-y: auto; }
+      .zoneItem {
+        padding: 8px 14px; border-bottom: 1px solid rgba(133,201,242,.08);
+        display: flex; align-items: center; gap: 8px;
+        cursor: pointer; transition: background .15s;
+      }
+      .zoneItem:hover { background: rgba(255,255,255,.04); }
+      .zoneSwatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+      .zoneName  { flex:1; font-size: 13px; }
+      .zoneFloor { font-size: 11px; color: var(--muted); }
+      .zoneToggle {
+        font-size: 11px; padding: 2px 8px; border-radius: 10px; border: none;
+        cursor: pointer; font-family: inherit;
+      }
+      .zoneDelete {
+        font-size: 13px; width: 22px; height: 22px; border: none;
+        background: rgba(255,94,106,.14); color: var(--danger);
+        border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+      }
+      /* alert log */
+      #alertLogSection { flex:1; display: flex; flex-direction: column; min-height: 0; }
+      #alertLog { flex:1; overflow-y: auto; }
+      .alertEntry {
+        padding: 7px 14px; font-size: 12px;
+        border-bottom: 1px solid rgba(133,201,242,.06);
+        color: var(--muted); cursor: pointer; transition: background .15s;
+      }
+      .alertEntry:hover { background: rgba(255,255,255,.04); }
+      .alertEntry .aTime { font-size: 10px; color: rgba(130,200,240,.5); margin-bottom: 2px; }
+      .alertEntry .aText { color: var(--warn); }
+      /* broadcast */
+      #broadcastSection { padding: 10px 14px; }
+      #broadcastInput {
+        width: 100%; padding: 8px 10px;
+        background: rgba(255,255,255,.06); border: 1px solid var(--line-strong);
+        border-radius: 6px; color: var(--text); font-size: 13px; font-family: inherit;
+        outline: none; resize: none;
+      }
+      #broadcastInput:focus { border-color: var(--accent); }
+      #btnBroadcast {
+        margin-top: 7px; width: 100%; padding: 8px;
+        background: linear-gradient(135deg,#1e6a9e,#1557a0);
+        border: 1px solid var(--accent); border-radius: 6px;
+        color: var(--text); font-size: 13px; font-family: inherit;
+        cursor: pointer; transition: opacity .2s;
+      }
+      #btnBroadcast:hover { opacity: .85; }
+      /* sim users section */
+      #simSection {
+        padding: 10px 14px; border-bottom: 1px solid var(--line);
+        display: flex; gap: 6px; flex-wrap: wrap;
+      }
+      .simBtn {
+        padding: 5px 12px; font-size: 12px; font-family: inherit;
+        border: 1px solid var(--line-strong); border-radius: 5px;
+        background: var(--bg-2); color: var(--text); cursor: pointer;
+        transition: background .15s;
+      }
+      .simBtn:hover { background: rgba(125,212,255,.1); }
+
+      /* ── Connection panel (collapsible) ───────────────────────── */
+      #connPanel {
+        position: fixed; bottom: 14px; right: calc(var(--panel-w) + 14px);
+        z-index: 50; background: var(--bg-2);
+        border: 1px solid var(--line-strong); border-radius: 10px;
+        box-shadow: 0 8px 28px var(--shadow);
+        width: 320px;
+      }
+      #connPanelToggle {
+        padding: 10px 14px; cursor: pointer; display: flex; align-items: center;
+        gap: 8px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+        color: var(--accent); user-select: none;
+      }
+      #connPanelToggle::before { content: '▶'; font-size: 10px; transition: transform .15s; }
+      #connPanel.open #connPanelToggle::before { transform: rotate(90deg); }
+      #connFields { display: none; padding: 0 14px 14px; }
+      #connPanel.open #connFields { display: block; }
+      .cfRow { margin-bottom: 8px; }
+      .cfRow label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; text-transform: uppercase; letter-spacing: .05em; }
+      .cfRow input {
+        width: 100%; padding: 7px 10px; background: rgba(255,255,255,.06);
+        border: 1px solid var(--line-strong); border-radius: 5px;
+        color: var(--text); font-size: 13px; font-family: inherit; outline: none;
+      }
+      .cfRow input:focus { border-color: var(--accent); }
+      #btnConnect {
+        width: 100%; padding: 8px; margin-top: 4px;
+        background: linear-gradient(135deg,#1e6a9e,#1557a0);
+        border: 1px solid var(--accent); border-radius: 6px;
+        color: var(--text); font-size: 13px; font-family: inherit;
+        cursor: pointer;
+      }
+      #connError { margin-top: 6px; font-size: 12px; color: var(--danger); min-height: 16px; }
+
+      /* ── Zone Config modal ────────────────────────────────────── */
+      #zoneModal {
+        position: fixed; inset: 0; z-index: 200;
+        display: none; align-items: center; justify-content: center;
+        background: rgba(4,10,16,.72); backdrop-filter: blur(6px);
+      }
+      #zoneModal.open { display: flex; }
+      #zoneModalBox {
+        background: var(--bg-2); border: 1px solid var(--line-strong);
+        border-radius: 10px; padding: 24px 28px; width: min(380px, 92vw);
+        box-shadow: 0 20px 48px var(--shadow);
+      }
+      #zoneModalBox h2 { font-size: 14px; letter-spacing: .1em; text-transform: uppercase; color: var(--accent); margin-bottom: 18px; }
+      .mfRow { margin-bottom: 12px; }
+      .mfRow label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; }
+      .mfRow input, .mfRow select, .mfRow textarea {
+        width: 100%; padding: 8px 10px; background: rgba(255,255,255,.06);
+        border: 1px solid var(--line-strong); border-radius: 6px;
+        color: var(--text); font-size: 13px; font-family: inherit; outline: none;
+      }
+      .mfRow input:focus, .mfRow select:focus { border-color: var(--accent); }
+      .mfRow select option { background: #0e1c29; }
+      .mfRow input[type="color"] { padding: 2px 6px; height: 36px; cursor: pointer; }
+      .mfRow .row2 { display: flex; gap: 10px; }
+      .mfRow .row2 > * { flex: 1; }
+      .modalBtns { display: flex; gap: 8px; margin-top: 18px; }
+      .modalBtns button {
+        flex: 1; padding: 9px; font-size: 13px; font-family: inherit;
+        border-radius: 6px; cursor: pointer; transition: opacity .15s;
+      }
+      #btnModalSave {
+        background: linear-gradient(135deg,#1e6a9e,#1557a0);
+        border: 1px solid var(--accent); color: var(--text);
+      }
+      #btnModalCancel {
+        background: rgba(255,255,255,.06);
+        border: 1px solid var(--line-strong); color: var(--muted);
+      }
+
+      /* scrollbars */
+      ::-webkit-scrollbar { width: 4px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: rgba(125,212,255,.2); border-radius: 2px; }
+    </style>
+  </head>
+  <body>
+    <!-- Top bar -->
+    <div id="topBar">
+      <h1>Hospital Tracking — Admin</h1>
+      <div class="topSep"></div>
+      <div id="connStatus">Status: <span id="connStatusBadge" class="err">Disconnected</span></div>
+    </div>
+
+    <!-- Floor tabs -->
+    <div id="floorTabs">
+      <button class="floorTab active" data-floor="1">1F · Triage</button>
+      <button class="floorTab"        data-floor="2">2F · Inpatient</button>
+      <button class="floorTab"        data-floor="3">3F · Diagnostics</button>
+    </div>
+
+    <!-- Main area -->
+    <div id="mainArea">
+      <!-- Map canvas -->
+      <div id="mapWrapper">
+        <canvas id="mapCanvas"></canvas>
+        <div id="mapToolbar">
+          <button class="toolBtn" id="toolSelect">▷ Select</button>
+          <button class="toolBtn active" id="toolDrawRect">▯ Rect</button>
+          <button class="toolBtn" id="toolDrawCircle">○ Circle</button>
+          <button class="toolBtn" id="toolDrawPoly">⬡ Polygon</button>
+          <button class="toolBtn" id="btnPublishZones">↑ Push Zones to Users</button>
+          <button class="toolBtn" id="btnExportZones">↓ Export JSON</button>
+          <button class="toolBtn" id="btnImportZones">↑ Import JSON</button>
+          <input type="file" id="fileImport" accept=".json" style="display:none" />
+        </div>
+        <div id="mapHint">Drag to draw a rect · Click existing zone to edit · Delete key removes selection</div>
+      </div>
+
+      <!-- Right sidebar -->
+      <div id="sidebar">
+        <!-- Simulate users -->
+        <div id="simSection" class="sideSection">
+          <button class="simBtn" id="btnAddSim">+ Sim User</button>
+          <button class="simBtn" id="btnClearSim">Clear Sims</button>
+          <button class="simBtn" id="btnClearLog">Clear Log</button>
+        </div>
+
+        <!-- User list -->
+        <div class="sideSection" id="userListSection">
+          <div class="sideHeader">Online Users <span class="badge" id="userCountBadge">0</span></div>
+          <div id="userList"></div>
+        </div>
+
+        <!-- Zone list -->
+        <div class="sideSection" id="zoneListSection">
+          <div class="sideHeader">Geo-Fences <span class="badge" id="zoneCountBadge">0</span></div>
+          <div id="zoneList"></div>
+        </div>
+
+        <!-- Alert log -->
+        <div class="sideSection" id="alertLogSection">
+          <div class="sideHeader">Alert Log</div>
+          <div id="alertLog"></div>
+        </div>
+
+        <!-- Broadcast -->
+        <div id="broadcastSection">
+          <textarea id="broadcastInput" rows="2" placeholder="Type a broadcast message…"></textarea>
+          <button id="btnBroadcast">Send Broadcast</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connection panel -->
+    <div id="connPanel">
+      <div id="connPanelToggle">Solace Connection</div>
+      <div id="connFields">
+        <div class="cfRow"><label>Solace URL</label><input id="cfUrl" type="text" placeholder="wss://…:443" /></div>
+        <div class="cfRow"><label>VPN</label><input id="cfVpn" type="text" placeholder="message-vpn" /></div>
+        <div class="cfRow"><label>Username</label><input id="cfUser" type="text" placeholder="solace-cloud-client" /></div>
+        <div class="cfRow"><label>Password</label><input id="cfPass" type="password" placeholder="••••••••" /></div>
+        <button id="btnConnect">Connect</button>
+        <div id="connError"></div>
+      </div>
+    </div>
+
+    <!-- Zone config modal -->
+    <div id="zoneModal">
+      <div id="zoneModalBox">
+        <h2 id="zoneModalTitle">Configure Geo-Fence</h2>
+        <div class="mfRow"><label>Zone Name</label><input id="mfName" type="text" placeholder="ICU Isolation Zone" /></div>
+        <div class="mfRow"><label>Zone Type</label>
+          <select id="mfType">
+            <option value="restricted">Restricted</option>
+            <option value="isolation">Isolation</option>
+            <option value="evacuation">Evacuation Route</option>
+            <option value="custom">Custom</option>
+          </select>
+        </div>
+        <div class="mfRow"><label>Floor</label>
+          <select id="mfFloor">
+            <option value="1">1F</option>
+            <option value="2">2F</option>
+            <option value="3">3F</option>
+          </select>
+        </div>
+        <div class="mfRow" id="mfSizeRect">
+          <div class="row2">
+            <div><label>Width (world units)</label><input id="mfWidth" type="number" step="0.5" min="1" /></div>
+            <div><label>Depth (world units)</label><input id="mfDepth" type="number" step="0.5" min="1" /></div>
+          </div>
+        </div>
+        <div class="mfRow" id="mfSizeCircle" style="display:none">
+          <label>Radius (world units)</label>
+          <input id="mfRadius" type="number" step="0.5" min="0.5" placeholder="e.g. 4.0" />
+        </div>
+        <div class="mfRow" id="mfPolyInfo" style="display:none">
+          <label>Shape</label>
+          <p style="font-size:12px;color:var(--muted);padding:6px 0">Polygon boundary drawn on map — geometry is locked. Edit name, type and color only.</p>
+        </div>
+        <div class="mfRow"><label>Warning Message</label><input id="mfWarning" type="text" placeholder="Unauthorised access prohibited" /></div>
+        <div class="mfRow"><label>Color</label><input id="mfColor" type="color" value="#ff5e6a" /></div>
+        <div class="modalBtns">
+          <button id="btnModalCancel">Cancel</button>
+          <button id="btnModalSave">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./admin.js"></script>
+  </body>
+</html>
