@@ -1,69 +1,67 @@
 # Deploy To Google Apps Script
 
-This project now supports a Google Apps Script deployment flow.
+This project is ready to be deployed to Google Apps Script as a Web App. The repository contains the required GAS wrapper files and now includes a CLI helper for build, push, and deploy.
 
-## What changed
+## What is ready
 
-- `npm run build:gas` builds a single-file Vite bundle.
-- The built HTML is copied to `gas/Index.html`.
-- `gas/Code.gs` and `gas/appsscript.json` are ready for a web app deployment.
-- Camera control was changed to drag-to-rotate so the app does not depend on pointer lock.
+- `npm run build:gas` builds the Vite app and copies the generated HTML to `gas/Index.html`.
+- `gas/Code.gs` serves the built page through Apps Script HTML Service.
+- `gas/appsscript.json` is already configured for Web App deployment.
+- `npm run gas:push` builds the app and pushes the GAS files with `clasp`.
+- `npm run gas:deploy` builds, pushes, and creates a deployment with `clasp`.
 
 ## One-time setup
 
-1. Install dependencies:
+1. Install project dependencies:
    `npm install`
-2. Install clasp globally if you want CLI deployment:
+2. Install `clasp` globally:
    `npm install -g @google/clasp`
 3. Log in to Google:
    `clasp login`
+4. Create a standalone Apps Script project in `https://script.google.com`
+5. Copy the Script ID from the Apps Script project settings
 
-## Build the GAS files
+## Fastest CLI path
 
-Run:
+Run this command once with your Script ID:
 
-`npm run build:gas`
+`npm run gas:deploy -- --script-id=YOUR_SCRIPT_ID --description="initial web app deployment"`
 
-This produces:
+What the helper does:
 
-- `dist/index.html`
-- `gas/Index.html`
+1. Runs `npm run build:gas`
+2. Creates `.clasp.json` automatically if it does not exist yet
+3. Runs `clasp push`
+4. Runs `clasp deploy`
 
-## Create the Apps Script project
+## Push updates without creating a new deployment
 
-Option A: Use the browser
+Use this when you only want to upload the latest files:
 
-1. Open `https://script.google.com`
-2. Create a new standalone project.
-3. Add these files from the local `gas` folder:
-   - `Code.gs`
-   - `Index.html`
-   - `appsscript.json`
-4. Save the project.
-5. Deploy as a Web App.
+`npm run gas:push -- --script-id=YOUR_SCRIPT_ID`
 
-Option B: Use clasp
+## Manual browser-based fallback
 
-1. Create a new Apps Script project:
-   `clasp create --type standalone --title "Hospital Exploration Prototype" --rootDir gas`
-2. If you already have a GAS project, copy `.clasp.json.example` to `.clasp.json` and set your `scriptId`.
-3. Push the local `gas` folder:
-   `clasp push`
-4. Create a deployment:
-   `clasp deploy --description "initial web app deployment"`
+If you do not want to use `clasp`, you can still deploy manually:
 
-## Deploy as a web app in the Apps Script UI
+1. Run `npm run build:gas`
+2. Open `https://script.google.com`
+3. Create a standalone Apps Script project
+4. Copy these local files into the Apps Script editor:
+   - `gas/Code.gs`
+   - `gas/Index.html`
+   - `gas/appsscript.json`
+5. Deploy as a Web App
 
-1. Click `Deploy`.
-2. Click `New deployment`.
-3. Select `Web app`.
-4. Set `Execute as` to `Me`.
-5. Set access to `Anyone` or `Anyone with Google account`.
-6. Deploy and open the URL.
+## Recommended Web App settings
+
+1. Choose `Web app`
+2. Set `Execute as` to `Me`
+3. Set access to `Anyone with Google account` for internal use, or `Anyone` only if that is intentional
 
 ## Notes
 
-- GAS HTML Service runs in a sandboxed iframe, so drag camera is safer than pointer-lock camera.
-- If you edit the game, rebuild before pushing again:
-  `npm run build:gas`
-- The local source files are still `index.html` and `main.js`. Do not edit `gas/Index.html` by hand unless you really need to.
+- GAS HTML Service runs inside a sandboxed iframe, so drag-based camera control is safer than pointer lock.
+- Rebuild from source instead of editing `gas/Index.html` by hand.
+- The source of truth remains `index.html`, `main.js`, and any imported modules.
+- If `.clasp.json` already exists, the helper reuses it and does not overwrite it.

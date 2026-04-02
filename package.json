@@ -6,14 +6,18 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "demo:publish:solace": "node scripts/publish-solace-demo.mjs",
     "prepare:gas": "node scripts/prepare-gas.mjs",
-    "build:gas": "npm run build && npm run prepare:gas"
+    "build:gas": "npm run build && npm run prepare:gas",
+    "gas:push": "node scripts/deploy-gas.mjs --push-only",
+    "gas:deploy": "node scripts/deploy-gas.mjs"
   },
   "devDependencies": {
     "vite": "^5.0.0",
     "vite-plugin-singlefile": "^2.3.2"
   },
   "dependencies": {
+    "solclientjs": "^10.18.3",
     "three": "^0.160.0"
   }
 }

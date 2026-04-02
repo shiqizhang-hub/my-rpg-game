@@ -177,6 +177,15 @@
         background: var(--bg-2);
       }
 
+      #telemetryPanel {
+        position: absolute;
+        left: 20px;
+        top: 356px;
+        width: min(360px, calc(100vw - 32px));
+        padding: 18px 16px 16px;
+        pointer-events: auto;
+      }
+
       #accessList {
         list-style: none;
         margin: 8px 0 0;
@@ -211,7 +220,103 @@
         background: rgba(123, 241, 168, 0.12);
       }
 
+      .badgeState.warn {
+        color: var(--warn);
+        border-color: rgba(255, 214, 125, 0.45);
+        background: rgba(255, 214, 125, 0.12);
+      }
+
       .badgeState.locked {
+        color: var(--muted);
+      }
+
+      .controlGrid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 10px;
+      }
+
+      .fieldGroup {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .fieldGroup.span2 {
+        grid-column: 1 / -1;
+      }
+
+      .fieldGroup label,
+      .inlineToggle {
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+
+      .fieldGroup input,
+      .fieldGroup select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: rgba(5, 12, 19, 0.78);
+        color: var(--text);
+        padding: 10px 11px;
+        font: inherit;
+      }
+
+      .fieldGroup input::placeholder {
+        color: rgba(149, 173, 188, 0.72);
+      }
+
+      .fieldGroup input:disabled,
+      .fieldGroup select:disabled {
+        opacity: 0.56;
+      }
+
+      .buttonRow {
+        display: flex;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      .actionButton {
+        flex: 1 1 auto;
+        border: 1px solid var(--line-strong);
+        border-radius: 6px;
+        background: linear-gradient(180deg, rgba(119, 213, 255, 0.18), rgba(14, 28, 41, 0.96));
+        color: var(--text);
+        padding: 10px 12px;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+
+      .actionButton.secondary {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .inlineToggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .inlineToggle input {
+        width: 16px;
+        height: 16px;
+        accent-color: var(--accent);
+      }
+
+      .hintText {
+        margin-top: 10px;
+        font-size: 13px;
+        line-height: 1.5;
         color: var(--muted);
       }
 
@@ -305,7 +410,8 @@
 
       @media (max-width: 720px) {
         #mission,
-        #statusBar {
+        #statusBar,
+        #telemetryPanel {
           left: 16px;
           right: 16px;
           width: auto;
@@ -314,6 +420,11 @@
         #statusBar {
           top: auto;
           bottom: 96px;
+        }
+
+        #telemetryPanel {
+          top: auto;
+          bottom: 192px;
         }
 
         #accessPanel {
@@ -325,13 +436,17 @@
         }
 
         #prompt {
-          bottom: 138px;
+          bottom: 292px;
         }
 
         #restartButton {
-          bottom: 248px;
+          bottom: 402px;
           width: calc(100vw - 32px);
           max-width: 320px;
+        }
+
+        .controlGrid {
+          grid-template-columns: 1fr;
         }
       }
     </style>
@@ -351,7 +466,7 @@
           <li>Mouse wheel: zoom camera in or out</li>
           <li>E: interact, inspect clue, or use stairs</li>
           <li>Touch drag on mobile: rotate camera</li>
-          <li>Inspect all hospital checkpoints across 3 floors, then return to the main lobby</li>
+          <li>Geo-fenced danger zones warn the patient on approach and block entry on contact</li>
         </ul>
       </section>
 
@@ -371,7 +486,71 @@
         <ul id="accessList">
           <li><span>ICU Access</span><span class="badgeState locked">Locked</span></li>
           <li><span>Radiology Archive</span><span class="badgeState locked">Locked</span></li>
+          <li><span>Geo-Fence Monitor</span><span class="badgeState online">Clear</span></li>
         </ul>
+      </section>
+
+      <section id="telemetryPanel" class="panel">
+        <span class="label">Telemetry Source</span>
+        <div class="controlGrid">
+          <div class="fieldGroup span2">
+            <label for="telemetrySource">Feed Mode</label>
+            <select id="telemetrySource">
+              <option value="simulator">Local simulator</option>
+              <option value="solace-topic">Solace topic</option>
+              <option value="solace-queue">Solace queue</option>
+            </select>
+          </div>
+
+          <div class="fieldGroup span2">
+            <label for="telemetryChannel">Topic / Queue</label>
+            <input id="telemetryChannel" type="text" placeholder="hospital/demo/location/device/demo-tag-001" />
+          </div>
+
+          <div class="fieldGroup span2">
+            <label for="telemetryUrl">Solace WebSocket URL</label>
+            <input id="telemetryUrl" type="text" placeholder="wss://host.messaging.solace.cloud:443" />
+          </div>
+
+          <div class="fieldGroup">
+            <label for="telemetryVpn">VPN</label>
+            <input id="telemetryVpn" type="text" placeholder="msgvpn" />
+          </div>
+
+          <div class="fieldGroup">
+            <label for="telemetryDeviceId">Device ID</label>
+            <input id="telemetryDeviceId" type="text" placeholder="demo-tag-001" />
+          </div>
+
+          <div class="fieldGroup">
+            <label for="telemetryUsername">Username</label>
+            <input id="telemetryUsername" type="text" placeholder="solace-cloud-client" />
+          </div>
+
+          <div class="fieldGroup">
+            <label for="telemetryPassword">Password</label>
+            <input id="telemetryPassword" type="password" placeholder="password" />
+          </div>
+        </div>
+
+        <label class="inlineToggle">
+          <input id="manualControlToggle" type="checkbox" />
+          <span>Enable manual debug controls</span>
+        </label>
+
+        <div class="buttonRow">
+          <button id="applyTelemetryButton" type="button" class="actionButton">Connect</button>
+          <button id="stopTelemetryButton" type="button" class="actionButton secondary">Stop</button>
+        </div>
+
+        <div class="buttonRow">
+          <button id="exportTraceButton" type="button" class="actionButton secondary">Export Trace</button>
+          <button id="clearTraceButton" type="button" class="actionButton secondary">Clear Trace</button>
+        </div>
+
+        <div id="telemetryHint" class="hintText">
+          Simulator and Solace messages can both drive the avatar. Route messages may include door, objective, NPC, and stairs events so the patient can complete the full hospital flow automatically.
+        </div>
       </section>
 
       <section id="dialoguePanel" class="panel" aria-live="polite">
@@ -380,7 +559,7 @@
       </section>
 
       <button id="restartButton" type="button">Restart Survey</button>
-      <section id="prompt" class="panel">Reach the glowing hospital stations to inspect the building.</section>
+      <section id="prompt" class="panel">Reach the glowing hospital stations to inspect the building, but keep the patient clear of marked restricted zones.</section>
     </div>
     <script type="module" src="/main.js"></script>
   </body>

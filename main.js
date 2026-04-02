@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 
+import { DEFAULT_TELEMETRY_CONFIG, createTelemetryController } from './telemetry.js';
+
 const app = document.querySelector('#app');
 const floorLevelEl = document.querySelector('#floorLevel');
 const locationEl = document.querySelector('#location');
@@ -15,9 +17,26 @@ const dialogueSpeakerEl = document.querySelector('#dialogueSpeaker');
 const dialogueTextEl = document.querySelector('#dialogueText');
 const promptEl = document.querySelector('#prompt');
 const restartButtonEl = document.querySelector('#restartButton');
+const telemetrySourceEl = document.querySelector('#telemetrySource');
+const telemetryChannelEl = document.querySelector('#telemetryChannel');
+const telemetryUrlEl = document.querySelector('#telemetryUrl');
+const telemetryVpnEl = document.querySelector('#telemetryVpn');
+const telemetryDeviceIdEl = document.querySelector('#telemetryDeviceId');
+const telemetryUsernameEl = document.querySelector('#telemetryUsername');
+const telemetryPasswordEl = document.querySelector('#telemetryPassword');
+const manualControlToggleEl = document.querySelector('#manualControlToggle');
+const applyTelemetryButtonEl = document.querySelector('#applyTelemetryButton');
+const stopTelemetryButtonEl = document.querySelector('#stopTelemetryButton');
+const exportTraceButtonEl = document.querySelector('#exportTraceButton');
+const clearTraceButtonEl = document.querySelector('#clearTraceButton');
+const telemetryHintEl = document.querySelector('#telemetryHint');
 
 const FLOOR_HEIGHT = 8;
 const WALK_SPEED = 5.4;
+const REMOTE_WALK_SPEED = 4.8;
+const REMOTE_ACTION_TRIGGER_DISTANCE = 2.15;
+const REMOTE_ARRIVAL_DISTANCE = 0.28;
+const REMOTE_COMMAND_SETTLE_DISTANCE = 1.15;
 const INTERACT_DISTANCE = 2.6;
 const STAIR_REENTRY_DELAY = 0.35;
 
@@ -36,6 +55,45 @@ const BASE_ZONES = [
     { id: 'records', name: 'Radiology Records', x: 14.5, z: -8.5, width: 15, depth: 16, color: 0x596a39 }
 ];
 
+const GEO_FENCES = [
+    {
+        id: 'pharmacy-isolation',
+        floorNumber: 1,
+        name: 'Sterile Pharmacy Bay',
+        x: -16.2,
+        z: -11.2,
+        width: 4.2,
+        depth: 4.8,
+        warningDistance: 3.4,
+        color: 0xffb347,
+        warningText: 'Sterile pharmacy bay ahead. Patients must stay outside the geo-fenced area.'
+    },
+    {
+        id: 'icu-isolation',
+        floorNumber: 2,
+        name: 'ICU Isolation Threshold',
+        x: 18.1,
+        z: 8.7,
+        width: 2.8,
+        depth: 6.2,
+        warningDistance: 3.2,
+        color: 0xff7f96,
+        warningText: 'ICU isolation area ahead. Patients are not allowed beyond this safety line.'
+    },
+    {
+        id: 'mri-magnet-room',
+        floorNumber: 3,
+        name: 'MRI Magnet Room',
+        x: 18,
+        z: -10,
+        width: 2.6,
+        depth: 8,
+        warningDistance: 3.8,
+        color: 0xff7868,
+        warningText: 'MRI magnet room ahead. Keep clear unless clinical staff explicitly escort the patient.'
+    }
+];
+
 const OBJECTIVES = [
     {
         id: 'triage-terminal',
@@ -43,6 +101,7 @@ const OBJECTIVES = [
         zoneId: 'triage',
         floorNumber: 1,
         localPosition: { x: -15, z: 10 },
+        approachPosition: { x: -13.2, z: 10 },
         color: 0x66ffc5,
         detail: 'Emergency intake is online. Continue upward through the hospital stairwell.'
     },
@@ -52,6 +111,7 @@ const OBJECTIVES = [
         zoneId: 'icu',
         floorNumber: 2,
         localPosition: { x: 15, z: 9 },
+        approachPosition: { x: 10.4, z: 10.6 },
         color: 0xffa9c7,
         detail: 'ICU bed assignments are secured. One final diagnostics record remains above.'
     },
@@ -60,7 +120,8 @@ const OBJECTIVES = [
         title: 'Inspect radiology archive terminal',
         zoneId: 'records',
         floorNumber: 3,
-        localPosition: { x: 15, z: -10 },
+        localPosition: { x: 14.2, z: -4.6 },
+        approachPosition: { x: 14.2, z: -4.6 },
         color: 0xffdd7c,
         detail: 'Radiology archive sweep finished. Return to Floor 1 for extraction.'
     }
@@ -159,6 +220,7 @@ const currentFloorState = { number: 1 };
 const missionState = { extractionUnlocked: false, missionComplete: false };
 const accessState = { icuClearance: false, radiologyClearance: false };
 const dialogueState = { speaker: '', text: '', timeout: 0 };
+const geofenceState = { activeAlertId: '', activeAlert: null, lastBlockedId: '', lastBlockedAt: 0 };
 const objectiveState = new Set();
 const colliders = [];
 const interactables = [];
@@ -180,6 +242,18 @@ const tempDoorSize = new THREE.Vector3();
 const tempDoorBox = new THREE.Box3();
 const spawnPoint = new THREE.Vector3(0, 0, 14.2);
 const extractionPoint = spawnPoint.clone();
+const remoteTargetPosition = spawnPoint.clone();
+const remoteMoveDelta = new THREE.Vector3();
+const remoteActionTargetPosition = new THREE.Vector3();
+const remotePreviousPosition = new THREE.Vector3();
+const remoteDetourDirection = new THREE.Vector3();
+const remoteBiasedDirection = new THREE.Vector3();
+
+const SOURCE_LABELS = {
+    simulator: 'Local simulator',
+    'solace-topic': 'Solace topic',
+    'solace-queue': 'Solace queue'
+};
 
 let currentZoneId = '';
 let nearbyInteractable = null;
@@ -194,6 +268,83 @@ let targetCameraDistance = cameraDistance;
 let isDraggingCamera = false;
 let lastPointerX = 0;
 let lastPointerY = 0;
+
+const controlState = { manualDebug: true };
+const remoteCommandQueue = [];
+const remoteCommandState = { active: null };
+const remoteSyncState = { awaitingReset: true, activeCycleId: '', lastStepIndex: -1 };
+const remoteAvoidanceState = { blockedTime: 0, detourSign: 1, lastLoggedAt: 0 };
+const remoteActionState = { pending: null, lastExecutedCommandId: '' };
+const traceState = { entries: [], sequence: 0 };
+const telemetryState = {
+    config: { ...DEFAULT_TELEMETRY_CONFIG },
+    connectionState: 'idle',
+    subscriptionState: 'idle',
+    lastPayload: null,
+    lastMessageAt: 0,
+    lastError: '',
+    lastTransport: 'simulator'
+};
+
+let telemetryController = null;
+
+function toFixedNumber(value) {
+    return Number.parseFloat(value.toFixed(2));
+}
+
+function serializeVector(vector) {
+    return {
+        x: toFixedNumber(vector.x),
+        y: toFixedNumber(vector.y),
+        z: toFixedNumber(vector.z)
+    };
+}
+
+function logTrace(event, detail = {}) {
+    traceState.sequence += 1;
+    traceState.entries.push({
+        index: traceState.sequence,
+        event,
+        at: new Date().toISOString(),
+        floor: currentFloorState.number,
+        player: serializeVector(player?.position ?? spawnPoint),
+        target: serializeVector(remoteTargetPosition),
+        activeCommand: remoteCommandState.active
+            ? {
+                action: remoteCommandState.active.action,
+                targetId: remoteCommandState.active.targetId || '',
+                label: remoteCommandState.active.label || '',
+                stepIndex: remoteCommandState.active.stepIndex ?? -1,
+                cycleId: remoteCommandState.active.cycleId || ''
+            }
+            : null,
+        detail
+    });
+
+    if (traceState.entries.length > 600) {
+        traceState.entries.shift();
+    }
+
+    window.__hospitalTrace = traceState.entries;
+}
+
+function clearTraceLog() {
+    traceState.entries = [];
+    traceState.sequence = 0;
+    window.__hospitalTrace = traceState.entries;
+    logTrace('trace-cleared');
+}
+
+function exportTraceLog() {
+    const blob = new Blob([JSON.stringify(traceState.entries, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `hospital-trace-${Date.now()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setStatus('Behavior trace exported.');
+}
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x09131d);
@@ -338,6 +489,38 @@ function createZoneMesh(zone, floorNumber, parent) {
 
     const label = createLabel(`F${floorNumber} ${zone.name}`, zone.color);
     label.position.copy(getWorldPosition(floorNumber, zone.x, zone.z, 3.1));
+    parent.add(label);
+}
+
+function createGeoFenceMarker(fence, parent) {
+    const fill = new THREE.Mesh(
+        new THREE.BoxGeometry(fence.width, 0.08, fence.depth),
+        new THREE.MeshStandardMaterial({
+            color: fence.color,
+            emissive: fence.color,
+            emissiveIntensity: 0.22,
+            roughness: 0.42,
+            transparent: true,
+            opacity: 0.18
+        })
+    );
+    fill.position.copy(getWorldPosition(fence.floorNumber, fence.x, fence.z, 0.05));
+    parent.add(fill);
+
+    const frame = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(fence.width, 1.8, fence.depth)),
+        new THREE.LineBasicMaterial({ color: fence.color, transparent: true, opacity: 0.86 })
+    );
+    frame.position.copy(getWorldPosition(fence.floorNumber, fence.x, fence.z, 0.92));
+    parent.add(frame);
+
+    const beacon = new THREE.PointLight(fence.color, 0.45, 7, 2);
+    beacon.position.copy(getWorldPosition(fence.floorNumber, fence.x, fence.z, 1.5));
+    parent.add(beacon);
+
+    const label = createLabel(`Restricted: ${fence.name}`, fence.color);
+    label.position.copy(getWorldPosition(fence.floorNumber, fence.x, fence.z, 2.7));
+    label.scale.set(7.2, 1.5, 1);
     parent.add(label);
 }
 
@@ -661,7 +844,11 @@ function createFloorShell(floorConfig) {
     createBlock({ parent: group, floorNumber: floorConfig.number, x: -12.4, z: 6.4, width: 4.2, depth: 1.6, height: 1.1, material: propMaterial, collidable: true });
     createBlock({ parent: group, floorNumber: floorConfig.number, x: -16, z: -9.5, width: 4.2, depth: 1.8, height: 0.9, material: trimMaterial, collidable: true });
     createBlock({ parent: group, floorNumber: floorConfig.number, x: -12.4, z: -11.8, width: 2.2, depth: 2.2, height: 0.8, material: trimMaterial, collidable: true });
-    createBlock({ parent: group, floorNumber: floorConfig.number, x: 14.5, z: 8.5, width: 5.2, depth: 2.4, height: 1.05, material: propMaterial, collidable: true });
+    if (floorConfig.number === 2) {
+        createBlock({ parent: group, floorNumber: floorConfig.number, x: 14.5, z: 8.5, width: 2.4, depth: 5.2, height: 1.05, material: propMaterial, collidable: true });
+    } else {
+        createBlock({ parent: group, floorNumber: floorConfig.number, x: 14.5, z: 8.5, width: 5.2, depth: 2.4, height: 1.05, material: propMaterial, collidable: true });
+    }
     createBlock({ parent: group, floorNumber: floorConfig.number, x: 17.7, z: -9.2, width: 1.8, depth: 7.4, height: 2.2, material: propMaterial, collidable: true });
     createBlock({ parent: group, floorNumber: floorConfig.number, x: 11.8, z: -9.2, width: 1.8, depth: 7.4, height: 2.2, material: propMaterial, collidable: true });
 
@@ -670,6 +857,7 @@ function createFloorShell(floorConfig) {
 
     createHospitalDecor(floorConfig, group);
     createCorridorLights(floorConfig, group);
+    GEO_FENCES.filter((fence) => fence.floorNumber === floorConfig.number).forEach((fence) => createGeoFenceMarker(fence, group));
 
     const floorBanner = createLabel(`${floorConfig.name} Hospital Wing`, floorConfig.accent);
     floorBanner.position.copy(getWorldPosition(floorConfig.number, 0, 20, 2.2));
@@ -1236,6 +1424,77 @@ function findZone(position, floorNumber) {
     });
 }
 
+function getGeoFenceDistance(position, fence) {
+    const dx = Math.max(Math.abs(position.x - fence.x) - fence.width / 2, 0);
+    const dz = Math.max(Math.abs(position.z - fence.z) - fence.depth / 2, 0);
+    return Math.hypot(dx, dz);
+}
+
+function getContainingGeoFence(position, floorNumber) {
+    return GEO_FENCES.find((fence) => {
+        if (fence.floorNumber !== floorNumber) {
+            return false;
+        }
+
+        return Math.abs(position.x - fence.x) <= fence.width / 2
+            && Math.abs(position.z - fence.z) <= fence.depth / 2;
+    }) ?? null;
+}
+
+function getGeoFenceAlert(position, floorNumber) {
+    let closestAlert = null;
+
+    GEO_FENCES.forEach((fence) => {
+        if (fence.floorNumber !== floorNumber) {
+            return;
+        }
+
+        const edgeDistance = getGeoFenceDistance(position, fence);
+        if (edgeDistance > fence.warningDistance) {
+            return;
+        }
+
+        if (!closestAlert || edgeDistance < closestAlert.edgeDistance) {
+            closestAlert = { fence, edgeDistance };
+        }
+    });
+
+    return closestAlert;
+}
+
+function handleGeoFenceBlocked(fence) {
+    const now = performance.now();
+    if (geofenceState.lastBlockedId === fence.id && now - geofenceState.lastBlockedAt < 1200) {
+        return;
+    }
+
+    geofenceState.lastBlockedId = fence.id;
+    geofenceState.lastBlockedAt = now;
+    setStatus(`Geo-fence block: ${fence.name}. Patient rerouted away from restricted area.`);
+    setDialogue('Safety Monitor', `Access denied. ${fence.warningText}`, 3.6);
+}
+
+function updateGeoFenceAlertState() {
+    const nextAlert = getGeoFenceAlert(player.position, currentFloorState.number);
+    const nextAlertId = nextAlert?.fence.id ?? '';
+
+    if (geofenceState.activeAlertId === nextAlertId) {
+        geofenceState.activeAlert = nextAlert;
+        return;
+    }
+
+    geofenceState.activeAlertId = nextAlertId;
+    geofenceState.activeAlert = nextAlert;
+    updateAccessUi();
+
+    if (!nextAlert) {
+        return;
+    }
+
+    setStatus(`Warning: ${nextAlert.fence.name} is ${(Math.max(nextAlert.edgeDistance, 0)).toFixed(1)}m away.`);
+    setDialogue('Safety Monitor', nextAlert.fence.warningText, 3.4);
+}
+
 function setStatus(text) {
     statusEl.textContent = text;
 }
@@ -1249,13 +1508,467 @@ function setDialogue(speaker, text, duration = 4.2) {
     dialoguePanelEl.classList.add('visible');
 }
 
+function getTelemetryConfig() {
+    return telemetryState.config ?? DEFAULT_TELEMETRY_CONFIG;
+}
+
+function getBadgeClass(stateText) {
+    if (['connected', 'subscribed', 'bound', 'simulated', 'clear', 'granted'].includes(stateText)) {
+        return 'badgeState online';
+    }
+
+    if (['warning', 'error', 'down'].includes(stateText)) {
+        return 'badgeState warn';
+    }
+
+    return 'badgeState locked';
+}
+
+function formatTimeAgo(timestamp) {
+    if (!timestamp) {
+        return 'Waiting';
+    }
+
+    const deltaSeconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+    if (deltaSeconds < 1) {
+        return 'Now';
+    }
+
+    if (deltaSeconds < 60) {
+        return `${deltaSeconds}s ago`;
+    }
+
+    return `${Math.round(deltaSeconds / 60)}m ago`;
+}
+
+function findInteractableById(id) {
+    return interactables.find((interactable) => interactable.id === id) ?? null;
+}
+
+function getInteractableApproachWorldPosition(interactable) {
+    if (!interactable?.approachPosition) {
+        return interactable?.position?.clone?.() ?? null;
+    }
+
+    return getWorldPosition(
+        interactable.floorNumber,
+        interactable.approachPosition.x,
+        interactable.approachPosition.z
+    );
+}
+
+function getRemoteCommandWorldTarget(command) {
+    if (!command) {
+        return null;
+    }
+
+    if (Number.isFinite(command.floor) && Number.isFinite(command.x) && Number.isFinite(command.z)) {
+        return getWorldPosition(command.floor, command.x, command.z);
+    }
+
+    if (command.action && command.action !== 'move' && command.action !== 'reset' && command.targetId) {
+        const target = findInteractableById(command.targetId);
+        const approachWorldPosition = getInteractableApproachWorldPosition(target);
+        if (approachWorldPosition) {
+            return approachWorldPosition;
+        }
+    }
+
+    return getWorldPosition(command.floor, command.x, command.z);
+}
+
+function resetRemoteAvoidance() {
+    remoteAvoidanceState.blockedTime = 0;
+    remoteAvoidanceState.detourSign = 1;
+    remoteAvoidanceState.lastLoggedAt = 0;
+}
+
+function clearRemoteCommandState() {
+    remoteCommandQueue.length = 0;
+    remoteCommandState.active = null;
+    remoteActionState.pending = null;
+    resetRemoteAvoidance();
+    logTrace('remote-queue-cleared');
+}
+
+function resetTelemetrySyncState() {
+    remoteSyncState.awaitingReset = true;
+    remoteSyncState.activeCycleId = '';
+    remoteSyncState.lastStepIndex = -1;
+}
+
+function resetRunState() {
+    objectiveState.clear();
+    missionState.extractionUnlocked = false;
+    missionState.missionComplete = false;
+    accessState.icuClearance = false;
+    accessState.radiologyClearance = false;
+    geofenceState.activeAlertId = '';
+    geofenceState.activeAlert = null;
+    geofenceState.lastBlockedId = '';
+    geofenceState.lastBlockedAt = 0;
+    currentZoneId = '';
+    nearbyInteractable = null;
+    stairCooldown = 0;
+    dialogueState.speaker = '';
+    dialogueState.text = '';
+    dialogueState.timeout = 0;
+    dialoguePanelEl.classList.remove('visible');
+    restartButtonEl.classList.remove('visible');
+
+    player.position.copy(spawnPoint);
+    remoteTargetPosition.copy(spawnPoint);
+    player.rotation.y = Math.PI;
+    setCurrentFloor(1);
+
+    interactables.forEach((interactable) => {
+        if (interactable.type === 'objective') {
+            interactable.completed = false;
+            interactable.orb.material.emissiveIntensity = 1.1;
+            interactable.light.intensity = 1.7;
+            return;
+        }
+
+        if (interactable.type === 'npc') {
+            interactable.granted = false;
+            interactable.light.intensity = 0.55;
+            return;
+        }
+
+        if (interactable.type === 'door') {
+            setDoorOpenState(interactable, false, { instant: true, announce: false });
+        }
+    });
+
+    extractionBeacon.group.visible = false;
+    extractionBeacon.light.intensity = 0.9;
+    extractionBeacon.column.material.opacity = 0.22;
+
+    updateFloorVisibility();
+    updateFloorUi();
+    updateZoneStatus(true);
+    updateAccessUi();
+    updateObjectiveUi();
+    updateNavigationUi();
+    updateInteractionPrompt();
+}
+
+function handleRemoteReset(payload) {
+    clearRemoteCommandState();
+    resetRunState();
+    remoteSyncState.awaitingReset = false;
+    remoteSyncState.activeCycleId = payload.cycleId || payload.commandId || '';
+    remoteSyncState.lastStepIndex = Number.isFinite(payload.stepIndex) ? payload.stepIndex : 0;
+    logTrace('remote-reset', { cycleId: remoteSyncState.activeCycleId, stepIndex: remoteSyncState.lastStepIndex });
+    setStatus(`Telemetry synchronized for ${payload.deviceId}. Starting a fresh route cycle.`);
+}
+
+function activateNextRemoteCommand() {
+    const nextCommand = remoteCommandQueue.shift() ?? null;
+    remoteCommandState.active = nextCommand;
+
+    if (!nextCommand) {
+        remoteActionState.pending = null;
+        return;
+    }
+
+    setCurrentFloor(nextCommand.floor);
+    remoteTargetPosition.copy(getRemoteCommandWorldTarget(nextCommand));
+    resetRemoteAvoidance();
+    queueRemoteAction(nextCommand);
+    logTrace('remote-command-activated', {
+        cycleId: nextCommand.cycleId || '',
+        stepIndex: nextCommand.stepIndex ?? -1,
+        action: nextCommand.action || 'move',
+        targetId: nextCommand.targetId || '',
+        label: nextCommand.label || ''
+    });
+}
+
+function completeRemoteCommand() {
+    logTrace('remote-command-completed');
+    remoteCommandState.active = null;
+    remoteActionState.pending = null;
+    activateNextRemoteCommand();
+    updateNavigationUi();
+    updateInteractionPrompt();
+}
+
+function enqueueRemoteCommand(payload) {
+    remoteCommandQueue.push(payload);
+    logTrace('remote-command-enqueued', {
+        cycleId: payload.cycleId || '',
+        stepIndex: payload.stepIndex ?? -1,
+        action: payload.action || 'move',
+        targetId: payload.targetId || '',
+        label: payload.label || '',
+        queueLength: remoteCommandQueue.length
+    });
+    if (!remoteCommandState.active) {
+        activateNextRemoteCommand();
+    }
+}
+
+function queueRemoteAction(payload) {
+    if (!payload.action || payload.action === 'move') {
+        remoteActionState.pending = null;
+        return;
+    }
+
+    remoteActionState.pending = {
+        commandId: payload.commandId,
+        action: payload.action,
+        targetId: payload.targetId || '',
+        floor: payload.floor
+    };
+}
+
+function resolveRemoteActionTarget(command) {
+    if (!command) {
+        return null;
+    }
+
+    const target = command.targetId ? findInteractableById(command.targetId) : nearbyInteractable;
+    if (!target || target.floorNumber !== currentFloorState.number) {
+        return null;
+    }
+
+    if (command.action === 'objective' && target.type !== 'objective') {
+        return null;
+    }
+
+    if (command.action === 'npc' && target.type !== 'npc') {
+        return null;
+    }
+
+    if (command.action === 'door' && target.type !== 'door') {
+        return null;
+    }
+
+    if (command.action === 'stairs' && target.type !== 'stairs') {
+        return null;
+    }
+
+    return target;
+}
+
+function isRemoteActionInRange(command) {
+    const target = resolveRemoteActionTarget(command);
+    if (!target) {
+        return false;
+    }
+
+    return player.position.distanceTo(target.position) <= INTERACT_DISTANCE;
+}
+
+function isRemoteCommandSettled(planarDistance) {
+    return planarDistance <= REMOTE_COMMAND_SETTLE_DISTANCE;
+}
+
+function executeRemoteAction(command) {
+    if (!command || remoteActionState.lastExecutedCommandId === command.commandId) {
+        remoteActionState.pending = null;
+        logTrace('remote-action-skipped', { reason: 'missing-or-duplicate' });
+        return true;
+    }
+
+    const target = resolveRemoteActionTarget(command);
+    if (!target) {
+        logTrace('remote-action-skipped', { reason: 'target-not-resolved', targetId: command.targetId || '' });
+        return false;
+    }
+
+    if (command.action === 'npc') {
+        talkToNpc(target);
+    } else if (command.action === 'door') {
+        setDoorOpenState(target, true, { instant: true });
+    } else if (command.action === 'stairs') {
+        useStairs(target);
+        remoteTargetPosition.copy(player.position);
+    } else if (command.action === 'objective') {
+        completeObjective(target);
+    }
+
+    remoteActionState.lastExecutedCommandId = command.commandId;
+    remoteActionState.pending = null;
+    logTrace('remote-action-executed', {
+        action: command.action,
+        targetId: command.targetId || '',
+        targetPosition: serializeVector(target.position)
+    });
+    return true;
+}
+
+function setCurrentFloor(floorNumber) {
+    if (currentFloorState.number === floorNumber) {
+        return;
+    }
+
+    currentFloorState.number = floorNumber;
+    currentZoneId = '';
+    updateFloorUi();
+    updateFloorVisibility();
+    updateZoneStatus(true);
+}
+
+function syncTelemetryForm(config) {
+    telemetrySourceEl.value = config.source;
+    telemetryChannelEl.value = config.destinationName;
+    telemetryUrlEl.value = config.wsUrl;
+    telemetryVpnEl.value = config.vpnName;
+    telemetryDeviceIdEl.value = config.deviceId;
+    telemetryUsernameEl.value = config.userName;
+    telemetryPasswordEl.value = config.password;
+    manualControlToggleEl.checked = controlState.manualDebug;
+    updateTelemetryFieldAvailability();
+}
+
+function readTelemetryForm() {
+    return {
+        source: telemetrySourceEl.value,
+        destinationName: telemetryChannelEl.value.trim(),
+        wsUrl: telemetryUrlEl.value.trim(),
+        vpnName: telemetryVpnEl.value.trim(),
+        deviceId: telemetryDeviceIdEl.value.trim(),
+        userName: telemetryUsernameEl.value.trim(),
+        password: telemetryPasswordEl.value,
+        simulatorIntervalMs: getTelemetryConfig().simulatorIntervalMs
+    };
+}
+
+function updateTelemetryFieldAvailability() {
+    const isSimulator = telemetrySourceEl.value === 'simulator';
+    [telemetryChannelEl, telemetryUrlEl, telemetryVpnEl, telemetryUsernameEl, telemetryPasswordEl].forEach((input) => {
+        input.disabled = isSimulator;
+    });
+
+    if (isSimulator) {
+        telemetryHintEl.textContent = controlState.manualDebug
+            ? 'Local simulator is available, but manual debug is currently controlling the patient.'
+            : 'Local simulator is active and driving the patient route.';
+        return;
+    }
+
+    telemetryHintEl.textContent = telemetrySourceEl.value === 'solace-topic'
+        ? 'Connect to Solace and subscribe to the configured topic for live coordinate updates.'
+        : 'Connect to Solace and bind to an existing durable queue for live coordinate updates.';
+}
+
+function handleTelemetryPayload(payload, transport) {
+    telemetryState.lastPayload = payload;
+    telemetryState.lastMessageAt = Date.now();
+    telemetryState.lastError = '';
+    telemetryState.lastTransport = transport;
+    telemetryState.config = {
+        ...getTelemetryConfig(),
+        deviceId: payload.deviceId || getTelemetryConfig().deviceId
+    };
+
+    if (payload.action === 'reset') {
+        handleRemoteReset(payload);
+        return;
+    }
+
+    if (remoteSyncState.awaitingReset) {
+        logTrace('remote-command-ignored', { reason: 'awaiting-reset', action: payload.action || 'move', stepIndex: payload.stepIndex ?? -1 });
+        setStatus('Telemetry connected. Waiting for the next route reset before playback starts.');
+        return;
+    }
+
+    const payloadCycleId = payload.cycleId || '';
+    if (remoteSyncState.activeCycleId && payloadCycleId && payloadCycleId !== remoteSyncState.activeCycleId) {
+        resetTelemetrySyncState();
+        setStatus('Received a different telemetry cycle without reset. Waiting for the next route reset.');
+        return;
+    }
+
+    const stepIndex = Number.isFinite(payload.stepIndex) ? payload.stepIndex : -1;
+    if (stepIndex >= 0 && stepIndex <= remoteSyncState.lastStepIndex) {
+        logTrace('remote-command-ignored', { reason: 'duplicate-step', stepIndex, lastStepIndex: remoteSyncState.lastStepIndex });
+        return;
+    }
+
+    remoteSyncState.activeCycleId = payloadCycleId || remoteSyncState.activeCycleId;
+    remoteSyncState.lastStepIndex = stepIndex;
+
+    enqueueRemoteCommand(payload);
+    updateAccessUi();
+    updateNavigationUi();
+    updateInteractionPrompt();
+}
+
+function handleTelemetryStateChange(nextState) {
+    telemetryState.config = nextState.config;
+    telemetryState.connectionState = nextState.connectionState;
+    telemetryState.subscriptionState = nextState.subscriptionState;
+    telemetryState.lastPayload = nextState.lastPayload;
+    telemetryState.lastMessageAt = nextState.lastMessageAt;
+    telemetryState.lastError = nextState.lastError;
+
+    updateAccessUi();
+    updateNavigationUi();
+    updateInteractionPrompt();
+}
+
+function connectTelemetryFromUi() {
+    clearRemoteCommandState();
+    resetTelemetrySyncState();
+    const result = telemetryController.start(readTelemetryForm());
+    telemetryState.config = telemetryController.getConfig();
+    syncTelemetryForm(telemetryState.config);
+
+    if (!result.ok) {
+        return;
+    }
+
+    controlState.manualDebug = false;
+    manualControlToggleEl.checked = false;
+
+    setStatus(`Telemetry source set to ${SOURCE_LABELS[telemetryState.config.source]}. Waiting for route reset.`);
+    updateTelemetryFieldAvailability();
+    updateAccessUi();
+    updateNavigationUi();
+    updateInteractionPrompt();
+}
+
 function updateAccessUi() {
     accessListEl.innerHTML = [
         { label: 'ICU Access', value: accessState.icuClearance },
-        { label: 'Radiology Archive', value: accessState.radiologyClearance }
+        { label: 'Radiology Archive', value: accessState.radiologyClearance },
+        {
+            label: 'Geo-Fence Monitor',
+            value: geofenceState.activeAlert
+                ? `Warning`
+                : 'Clear'
+        },
+        {
+            label: 'Telemetry Link',
+            value: telemetryState.connectionState
+        },
+        {
+            label: 'Telemetry Feed',
+            value: telemetryState.lastPayload
+                ? formatTimeAgo(telemetryState.lastMessageAt)
+                : telemetryState.subscriptionState
+        }
     ].map((entry) => {
-        const stateClass = entry.value ? 'badgeState online' : 'badgeState locked';
-        const stateText = entry.value ? 'Granted' : 'Locked';
+        let stateClass = 'badgeState locked';
+        let stateText = 'Locked';
+
+        if (entry.label === 'Geo-Fence Monitor') {
+            stateClass = geofenceState.activeAlert ? 'badgeState warn' : 'badgeState online';
+            stateText = geofenceState.activeAlert ? 'Warning' : 'Clear';
+        } else if (entry.label === 'Telemetry Link') {
+            stateClass = getBadgeClass(String(entry.value).toLowerCase());
+            stateText = String(entry.value);
+        } else if (entry.label === 'Telemetry Feed') {
+            stateClass = telemetryState.lastPayload ? 'badgeState online' : getBadgeClass(String(entry.value).toLowerCase());
+            stateText = telemetryState.lastPayload ? `Updated ${entry.value}` : String(entry.value || 'Idle');
+        } else {
+            stateClass = entry.value ? 'badgeState online' : 'badgeState locked';
+            stateText = entry.value ? 'Granted' : 'Locked';
+        }
+
         return `<li><span>${entry.label}</span><span class="${stateClass}">${stateText}</span></li>`;
     }).join('');
 }
@@ -1279,6 +1992,11 @@ function updateObjectiveUi() {
         nextHintEl.textContent = 'Extraction unlocked. Descend and return to the blue ring in the hospital lobby.';
     }
 
+    if (!controlState.manualDebug) {
+        const sourceLabel = SOURCE_LABELS[getTelemetryConfig().source] ?? 'Telemetry feed';
+        nextHintEl.textContent = `Remote telemetry mode active via ${sourceLabel}. Enable manual debug to inspect points directly.`;
+    }
+
     progressEl.innerHTML = `Collected intel points: <span class="ok">${objectiveState.size} / ${OBJECTIVES.length}</span>`;
     checklistEl.innerHTML = OBJECTIVES.map((objective) => {
         const done = objectiveState.has(objective.id);
@@ -1296,7 +2014,11 @@ function updateZoneStatus(force = false) {
     if (force || zone.id !== currentZoneId) {
         currentZoneId = zone.id;
         locationEl.textContent = `${zone.name}`;
-        setStatus(`Entered Floor ${currentFloorState.number} / ${zone.name}.`);
+        if (!controlState.manualDebug && telemetryState.lastPayload) {
+            setStatus(`Tracking ${telemetryState.lastPayload.deviceId} in Floor ${currentFloorState.number} / ${zone.name}.`);
+        } else {
+            setStatus(`Entered Floor ${currentFloorState.number} / ${zone.name}.`);
+        }
     }
 }
 
@@ -1317,7 +2039,23 @@ function tryMove(axis, distance) {
     player.position[axis] += distance;
     if (intersectsCollider()) {
         player.position[axis] -= distance;
+        return false;
     }
+
+    const blockedFence = getContainingGeoFence(player.position, currentFloorState.number);
+    if (blockedFence) {
+        player.position[axis] -= distance;
+        handleGeoFenceBlocked(blockedFence);
+        return false;
+    }
+
+    return true;
+}
+
+function tryMoveAlongVector(direction, step) {
+    const movedX = tryMove('x', direction.x * step);
+    const movedZ = tryMove('z', direction.z * step);
+    return movedX || movedZ;
 }
 
 function updateInteractionPrompt() {
@@ -1338,8 +2076,28 @@ function updateInteractionPrompt() {
 
     nearbyInteractable = closest;
 
+    if (geofenceState.activeAlert) {
+        const { fence, edgeDistance } = geofenceState.activeAlert;
+        const warningText = edgeDistance <= 0.35
+            ? `Restricted boundary reached: ${fence.name}. Patient entry is blocked.`
+            : `Warning: ${fence.name} is ${(Math.max(edgeDistance, 0)).toFixed(1)}m ahead.`;
+
+        if (nearbyInteractable) {
+            // Keep inspect and interaction prompts usable even inside a warning envelope.
+            geofenceState.activeAlert.overlayText = warningText;
+        } else {
+            promptEl.textContent = `${warningText} ${fence.warningText}`;
+            return;
+        }
+    } else {
+        geofenceState.activeAlert && delete geofenceState.activeAlert.overlayText;
+    }
+
     if (!nearbyInteractable) {
-        if (missionState.missionComplete) {
+        if (!controlState.manualDebug && telemetryState.lastPayload) {
+            const payload = telemetryState.lastPayload;
+            promptEl.textContent = `${payload.deviceId} is controlled by ${SOURCE_LABELS[getTelemetryConfig().source]}. Last point: Floor ${payload.floor}, x ${payload.x.toFixed(1)}, z ${payload.z.toFixed(1)}.`;
+        } else if (missionState.missionComplete) {
             promptEl.textContent = 'Hospital survey complete. Continue exploring or add the next gameplay system.';
         } else if (missionState.extractionUnlocked) {
             promptEl.textContent = 'Return to the blue ring in the Floor 1 Main Lobby to finish the survey.';
@@ -1350,46 +2108,78 @@ function updateInteractionPrompt() {
     }
 
     if (nearbyInteractable.type === 'stairs') {
-        promptEl.textContent = `Press E to ${nearbyInteractable.title.toLowerCase()}.`;
+        promptEl.textContent = geofenceState.activeAlert?.overlayText
+            ? `Press E to ${nearbyInteractable.title.toLowerCase()}. ${geofenceState.activeAlert.overlayText}`
+            : `Press E to ${nearbyInteractable.title.toLowerCase()}.`;
         return;
     }
 
     if (nearbyInteractable.type === 'door') {
         if (nearbyInteractable.requiredAccess && !accessState[nearbyInteractable.requiredAccess]) {
-            promptEl.textContent = nearbyInteractable.lockedText;
+            promptEl.textContent = geofenceState.activeAlert?.overlayText
+                ? `${nearbyInteractable.lockedText} ${geofenceState.activeAlert.overlayText}`
+                : nearbyInteractable.lockedText;
             return;
         }
 
         promptEl.textContent = nearbyInteractable.isOpen
             ? `Press E to close: ${nearbyInteractable.title}`
             : `Press E to open: ${nearbyInteractable.title}`;
+        if (geofenceState.activeAlert?.overlayText) {
+            promptEl.textContent += ` ${geofenceState.activeAlert.overlayText}`;
+        }
         return;
     }
 
     if (nearbyInteractable.type === 'npc') {
         if (nearbyInteractable.granted) {
             promptEl.textContent = `${nearbyInteractable.role}: clearance already issued.`;
+            if (geofenceState.activeAlert?.overlayText) {
+                promptEl.textContent += ` ${geofenceState.activeAlert.overlayText}`;
+            }
             return;
         }
 
         if (!nearbyInteractable.availableWhen()) {
             promptEl.textContent = `${nearbyInteractable.role}: finish the current station check first.`;
+            if (geofenceState.activeAlert?.overlayText) {
+                promptEl.textContent += ` ${geofenceState.activeAlert.overlayText}`;
+            }
             return;
         }
 
         promptEl.textContent = `Press E to talk to ${nearbyInteractable.role}.`;
+        if (geofenceState.activeAlert?.overlayText) {
+            promptEl.textContent += ` ${geofenceState.activeAlert.overlayText}`;
+        }
         return;
     }
 
     if (nearbyInteractable.completed) {
         promptEl.textContent = `${nearbyInteractable.title} already inspected.`;
+        if (geofenceState.activeAlert?.overlayText) {
+            promptEl.textContent += ` ${geofenceState.activeAlert.overlayText}`;
+        }
         return;
     }
 
     promptEl.textContent = `Press E to inspect: ${nearbyInteractable.title}`;
+    if (geofenceState.activeAlert?.overlayText) {
+        promptEl.textContent += ` ${geofenceState.activeAlert.overlayText}`;
+    }
 }
 
 function updateNavigationUi() {
+    if (!controlState.manualDebug && telemetryState.lastPayload) {
+        const payload = telemetryState.lastPayload;
+        const distanceToTarget = player.position.distanceTo(remoteTargetPosition).toFixed(1);
+        const pendingActionText = remoteActionState.pending
+            ? ` / pending ${remoteActionState.pending.action}${remoteActionState.pending.targetId ? `:${remoteActionState.pending.targetId}` : ''}`
+            : '';
+        distanceEl.textContent = `Navigation: ${payload.deviceId} / Floor ${payload.floor} / ${payload.zone || 'Unknown zone'} (${distanceToTarget}m to rendered target${pendingActionText})`;
+        return;
+    }
+
     if (missionState.missionComplete) {
         distanceEl.textContent = 'Navigation: mission completed.';
         return;
@@ -1507,16 +2297,31 @@ function completeObjective(interactable) {
     updateNavigationUi();
 }
 
-function toggleDoor(door) {
+function setDoorOpenState(door, isOpen, { instant = false, announce = true } = {}) {
     if (door.requiredAccess && !accessState[door.requiredAccess]) {
         setStatus(door.lockedText);
         setDialogue('Access Control', door.lockedText, 3.4);
         return;
     }
 
-    door.isOpen = !door.isOpen;
+    door.isOpen = isOpen;
     door.targetOpen = door.isOpen ? 1 : 0;
-    setStatus(door.isOpen ? `${door.title} opened.` : `${door.title} closed.`);
+
+    if (instant) {
+        door.openAmount = door.targetOpen;
+        const slideOffset = door.width * 0.3 * door.openAmount;
+        door.leftPanel.position.z = door.width * 0.23 + slideOffset;
+        door.rightPanel.position.z = -door.width * 0.23 - slideOffset;
+        door.light.intensity = 0.35 + door.openAmount * 0.4;
+    }
+
+    if (announce) {
+        setStatus(door.isOpen ? `${door.title} opened.` : `${door.title} closed.`);
+    }
+}
+
+function toggleDoor(door) {
+    setDoorOpenState(door, !door.isOpen);
 }
 
 function talkToNpc(npc) {
@@ -1548,13 +2353,9 @@ function useStairs(stair) {
         return;
     }
 
-    currentFloorState.number = stair.targetFloor;
+    setCurrentFloor(stair.targetFloor);
     player.position.copy(getWorldPosition(stair.targetFloor, stair.arrivalPosition.x, stair.arrivalPosition.z));
     stairCooldown = STAIR_REENTRY_DELAY;
-    currentZoneId = '';
-    updateFloorUi();
-    updateFloorVisibility();
-    updateZoneStatus(true);
     updateNavigationUi();
     updateInteractionPrompt();
     setStatus(stair.detail);
@@ -1676,6 +2477,28 @@ renderer.domElement.addEventListener('keyup', handleKeyUp);
 restartButtonEl.addEventListener('click', () => {
     window.location.reload();
 });
+telemetrySourceEl.addEventListener('change', updateTelemetryFieldAvailability);
+manualControlToggleEl.addEventListener('change', () => {
+    controlState.manualDebug = manualControlToggleEl.checked;
+    updateTelemetryFieldAvailability();
+    updateObjectiveUi();
+    updateNavigationUi();
+    updateInteractionPrompt();
+});
+applyTelemetryButtonEl.addEventListener('click', connectTelemetryFromUi);
+stopTelemetryButtonEl.addEventListener('click', () => {
+    telemetryController.stop();
+    telemetryState.connectionState = 'idle';
+    telemetryState.subscriptionState = 'idle';
+    clearRemoteCommandState();
+    resetTelemetrySyncState();
+    updateAccessUi();
+    updateNavigationUi();
+    updateInteractionPrompt();
+    setStatus('Telemetry stream stopped.');
+});
+exportTraceButtonEl.addEventListener('click', exportTraceLog);
+clearTraceButtonEl.addEventListener('click', clearTraceLog);
 
 window.addEventListener('blur', () => {
     Object.keys(keys).forEach((key) => {
@@ -1740,6 +2563,10 @@ window.addEventListener('touchend', () => {
     isDraggingCamera = false;
 });
 
+window.addEventListener('beforeunload', () => {
+    telemetryController?.destroy();
+});
+
 window.addEventListener('wheel', (event) => {
     targetCameraDistance = THREE.MathUtils.clamp(
         targetCameraDistance + event.deltaY * 0.01 * CAMERA_ZOOM_SENSITIVITY,
@@ -1758,33 +2585,123 @@ createExtractionBeacon();
 const player = createAvatar();
 const clock = new THREE.Clock();
 
+telemetryController = createTelemetryController({
+    onTelemetry: handleTelemetryPayload,
+    onStateChange: handleTelemetryStateChange
+});
+telemetryState.config = telemetryController.getConfig();
+controlState.manualDebug = manualControlToggleEl.checked;
+syncTelemetryForm(telemetryState.config);
+
 updateAccessUi();
 updateFloorUi();
 updateObjectiveUi();
 updateZoneStatus(true);
 updateNavigationUi();
 updateFloorVisibility();
-promptEl.textContent = 'Start in the hospital lobby, inspect each wing in order, and use the stair nodes to go up or down.';
+promptEl.textContent = 'Start in the hospital lobby, inspect each wing in order, and keep the patient outside marked restricted zones.';
 focusViewport();
+telemetryController.start(telemetryState.config);
 
 function updatePlayer(deltaTime, elapsedTime) {
     const rightInput = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
     const forwardInput = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0);
-    const isMoving = rightInput !== 0 || forwardInput !== 0;
+    let isMoving = false;
 
     cameraForward.set(-Math.sin(targetCameraYaw), 0, -Math.cos(targetCameraYaw)).normalize();
     cameraRight.set(Math.cos(targetCameraYaw), 0, -Math.sin(targetCameraYaw)).normalize();
 
-    moveDirection.set(0, 0, 0);
-    moveDirection.addScaledVector(cameraForward, forwardInput);
-    moveDirection.addScaledVector(cameraRight, rightInput);
+    if (controlState.manualDebug) {
+        isMoving = rightInput !== 0 || forwardInput !== 0;
+        moveDirection.set(0, 0, 0);
+        moveDirection.addScaledVector(cameraForward, forwardInput);
+        moveDirection.addScaledVector(cameraRight, rightInput);
 
-    if (isMoving) {
-        moveDirection.normalize();
-        player.rotation.y = Math.atan2(moveDirection.x, moveDirection.z) + Math.PI;
+        if (isMoving) {
+            moveDirection.normalize();
+            player.rotation.y = Math.atan2(moveDirection.x, moveDirection.z) + Math.PI;
 
-        tryMove('x', moveDirection.x * WALK_SPEED * deltaTime);
-        tryMove('z', moveDirection.z * WALK_SPEED * deltaTime);
+            tryMove('x', moveDirection.x * WALK_SPEED * deltaTime);
+            tryMove('z', moveDirection.z * WALK_SPEED * deltaTime);
+        }
+    } else {
+        const activeRemoteCommand = remoteCommandState.active;
+
+        if (activeRemoteCommand) {
+            remotePreviousPosition.copy(player.position);
+            remoteMoveDelta.copy(remoteTargetPosition).sub(player.position);
+            remoteMoveDelta.y = 0;
+            let planarDistance = remoteMoveDelta.length();
+
+            if (planarDistance > REMOTE_ARRIVAL_DISTANCE) {
+                const step = Math.min(planarDistance, REMOTE_WALK_SPEED * deltaTime);
+                remoteMoveDelta.normalize();
+                player.rotation.y = Math.atan2(remoteMoveDelta.x, remoteMoveDelta.z) + Math.PI;
+                let moved = tryMoveAlongVector(remoteMoveDelta, step);
+
+                if (!moved) {
+                    remoteAvoidanceState.blockedTime += deltaTime;
+
+                    remoteDetourDirection.set(
+                        -remoteMoveDelta.z * remoteAvoidanceState.detourSign,
+                        0,
+                        remoteMoveDelta.x * remoteAvoidanceState.detourSign
+                    ).normalize();
+
+                    remoteBiasedDirection.copy(remoteDetourDirection)
+                        .multiplyScalar(0.82)
+                        .addScaledVector(remoteMoveDelta, 0.38)
+                        .normalize();
+
+                    moved = tryMoveAlongVector(remoteBiasedDirection, step * 0.92);
+
+                    if (!moved && remoteAvoidanceState.blockedTime > 0.45) {
+                        if (performance.now() - remoteAvoidanceState.lastLoggedAt > 600) {
+                            remoteAvoidanceState.lastLoggedAt = performance.now();
+                            logTrace('remote-detour-attempt', {
+                                blockedTime: toFixedNumber(remoteAvoidanceState.blockedTime),
+                                detourSign: remoteAvoidanceState.detourSign
+                            });
+                        }
+                        remoteAvoidanceState.detourSign *= -1;
+                        remoteDetourDirection.set(
+                            -remoteMoveDelta.z * remoteAvoidanceState.detourSign,
+                            0,
+                            remoteMoveDelta.x * remoteAvoidanceState.detourSign
+                        ).normalize();
+                        remoteBiasedDirection.copy(remoteDetourDirection)
+                            .multiplyScalar(0.82)
+                            .addScaledVector(remoteMoveDelta, 0.38)
+                            .normalize();
+                        moved = tryMoveAlongVector(remoteBiasedDirection, step * 0.78);
+                    }
+                } else {
+                    remoteAvoidanceState.blockedTime = Math.max(0, remoteAvoidanceState.blockedTime - deltaTime * 2);
+                }
+
+                isMoving = moved && player.position.distanceTo(remotePreviousPosition) > 0.01;
+                planarDistance = player.position.distanceTo(remoteTargetPosition);
+            }
+
+            player.position.y = remoteTargetPosition.y;
+
+            if (remoteActionState.pending && remoteActionState.pending.floor === currentFloorState.number) {
+                const target = resolveRemoteActionTarget(remoteActionState.pending);
+                if (target) {
+                    remoteActionTargetPosition.copy(target.position);
+                    remoteActionTargetPosition.y = player.position.y;
+
+                    if (isRemoteActionInRange(remoteActionState.pending) || isRemoteCommandSettled(planarDistance)) {
+                        executeRemoteAction(remoteActionState.pending);
+                        completeRemoteCommand();
+                    }
+                }
+            } else if (isRemoteCommandSettled(planarDistance)) {
+                completeRemoteCommand();
+            }
+        } else {
+            player.position.y = remoteTargetPosition.y;
+        }
     }
 
     const bob = isMoving ? Math.sin(elapsedTime * 10) * 0.06 : 0;
@@ -1911,6 +2828,7 @@ function animate() {
     updatePlayer(deltaTime, elapsedTime);
     updateInteractables(elapsedTime);
     updateZoneStatus();
+    updateGeoFenceAlertState();
     updateInteractionPrompt();
     updateNavigationUi();
     checkMissionCompletion();

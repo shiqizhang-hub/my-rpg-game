@@ -1,0 +1,77 @@
+Solace auto-publish instructions for the full hospital flow
+
+Use the local publisher script if you want smooth continuous playback.
+The route is defined in demoRoute.js and uses ordered corridor waypoints, doorway approach points, and geo-fence preview passes.
+
+Publish topic:
+hospital/demo/location/device/demo-tag-001
+
+Delivery mode:
+Direct
+
+Payload contract:
+- floor, x, z: target position for the current command
+- action: reset, move, door, objective, npc, or stairs
+- targetId: interactable id to activate when the avatar gets close enough
+- waitMs: delay before the next command is published
+
+Recommended setup on the webpage:
+- Feed Mode: Solace topic
+- Topic / Queue: hospital/demo/location/device/demo-tag-001
+- Solace WebSocket URL: wss://mr-connection-19um2hxb71q.messaging.solace.cloud:443
+- VPN: test-service
+- Device ID: demo-tag-001
+- Username: solace-cloud-client
+- Password: your Solace password
+- Manual debug controls: off
+
+Expected webpage status after Connect:
+- Connection: connected
+- Subscription: subscribed
+- Playback note: if you connect in the middle of a Direct topic cycle, the page will wait for the next reset event and then restart cleanly from the lobby instead of jumping into the middle of the route.
+
+Best way to run the full flow automatically:
+1. In the project folder, run:
+  npm run dev
+2. Open the local URL shown by Vite.
+3. Fill in the Solace connection values above.
+4. Click Connect.
+5. In a new PowerShell terminal, run:
+
+  $env:SOLACE_URL="wss://mr-connection-19um2hxb71q.messaging.solace.cloud:443"
+  $env:SOLACE_VPN="test-service"
+  $env:SOLACE_USERNAME="solace-cloud-client"
+  $env:SOLACE_PASSWORD="YOUR_SOLACE_PASSWORD"
+  $env:SOLACE_TOPIC="hospital/demo/location/device/demo-tag-001"
+  npm run demo:publish:solace
+
+What this now does:
+- Connects to your Solace broker.
+- Emits a reset event at the start of every route cycle so the subscriber can resync cleanly.
+- Publishes the route continuously in the exact order from demoRoute.js.
+- Uses intermediate path points so movement is smoother and less likely to clip into walls.
+- Uses doorway approach points so the avatar does not try to cut diagonally through solid room dividers.
+- Passes near restricted areas on all floors so the geo-fencing warning system is visible during the run.
+- Publishes action events for doors, objectives, NPCs, and stairs so the avatar can complete the whole flow automatically.
+
+Optional fallback interval:
+If a route step does not declare waitMs, the publisher uses DEMO_INTERVAL_MS.
+
+Example:
+
+  $env:SOLACE_URL="wss://mr-connection-19um2hxb71q.messaging.solace.cloud:443"
+  $env:SOLACE_VPN="test-service"
+  $env:SOLACE_USERNAME="solace-cloud-client"
+  $env:SOLACE_PASSWORD="YOUR_SOLACE_PASSWORD"
+  $env:SOLACE_TOPIC="hospital/demo/location/device/demo-tag-001"
+  $env:DEMO_INTERVAL_MS="1200"
+  npm run demo:publish:solace
+
+How to stop continuous publishing:
+- Go to the PowerShell terminal running the script.
+- Press Ctrl+C.
+
+If you still want to publish manually from Solace Try Me:
+- Use the same topic and delivery mode above.
+- Copy any individual message shape from the publisher output in the terminal.
+- Or read the exact route sequence directly from demoRoute.js.
